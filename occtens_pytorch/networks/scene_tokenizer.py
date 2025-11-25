@@ -57,18 +57,26 @@ class MultiScaleVQVAE(nn.Module):
         self,
         in_channels: int,
         hidden_channels: int = 128,
-        latent_dim: int = 64,
-        num_codes: int = 1024,
+        latent_dim: int = 128,
+        num_codes: int = 4096,
         scales=(1,5,10,15,20,25),
         enc_kernel_size=[4,3,4,3]
     ):
         super().__init__()
 
         self.scales = list(scales)
-        self.n_scales = len(scales)
 
         # VQ
         self.vq = VectorQuantizer(num_codes=num_codes, code_dim=latent_dim)
+
+        self.phi_enc = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+            )
+            for _ in self.scales
+        ])
+
         self.phi_dec = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
@@ -90,56 +98,51 @@ class MultiScaleVQVAE(nn.Module):
             kernel_size=enc_kernel_size[::-1]
         )
 
-    def encode_multi_scale(self, x):
+    def encode(self, x):
         stats = {}
 
-        F_latent = self.encoder(x)  # (B, D, H_lat, W_lat)
-        B, D, H_lat, W_lat = F_latent.shape
+        f = self.encoder(x)  # (B, D, H_lat, W_lat), latent space
+        B, D, H_lat, W_lat = f.shape
 
         z_q_list = []
         indices_list = []
         vq_loss_sum = 0.0
 
-        for s in self.scales:
-            # Downsample
+        for idx, s in enumerate(self.scales):
             if s == H_lat and s == W_lat:
-                F_s = F_latent
+                f_hat = f
             else:
-                F_s = F.interpolate(F_latent, size=(s, s),
-                                    mode="bilinear", align_corners=False)
+                f_hat = F.interpolate(f, size=(s, s), mode="area")
 
-            # VQ
-            z_q_s, idx_s, vq_loss_s, perplex_s = self.vq(F_s)
+            z_q_s, idx_s, vq_loss_s, perplex_s = self.vq(f_hat)
 
             z_q_list.append(z_q_s)          # (B, D, s, s)
             indices_list.append(idx_s)      # (B, s, s)
             vq_loss_sum = vq_loss_sum + vq_loss_s
+            
+            z = self.vq.codebook(idx_s).permute(0,3,1,2)
+            z = F.interpolate(z, size=(H_lat, W_lat), mode="bicubic").contiguous()
+            f = f - self.phi_enc[idx](z)
 
             stats[f"perplexity_s{s}"] = perplex_s.detach()
 
-        return F_latent, z_q_list, indices_list, vq_loss_sum, stats
+        return f, z_q_list, indices_list, vq_loss_sum, stats
 
-    def decode_multi_scale(self, F_latent, z_q_list):
-        B, D, H_lat, W_lat = F_latent.shape
-        up_list = []
+    def decode(self, f, indices_list):
+        B, D, H_lat, W_lat = f.shape
+        f = torch.zeros_like(f)
 
-        for i, (s, z_q_s) in enumerate(zip(self.scales, z_q_list)):
-            if s == H_lat and s == W_lat:
-                up = z_q_s
-            else:
-                up = F.interpolate(z_q_s, size=(H_lat, W_lat),
-                                   mode="bilinear", align_corners=False)
+        for idx, idx_s in enumerate(indices_list):
+            z = self.vq.codebook(idx_s).permute(0,3,1,2)
+            z = F.interpolate(z, size=(H_lat, W_lat), mode="bicubic").contiguous()
+            f = f + self.phi_dec[idx](z)
 
-            up = self.phi_dec[i](up)
-            up_list.append(up)
-
-        F_hat = torch.stack(up_list, dim=0).sum(dim=0)  # (B, D, H_lat, W_lat)
-        return F_hat
+        recon = self.decoder(f)
+        return recon
 
     def forward(self, x):
-        F_latent, z_q_list, indices_list, vq_loss_sum, stats = self.encode_multi_scale(x)
-        F_hat = self.decode_multi_scale(F_latent, z_q_list)
-        x_hat = self.decoder(F_hat)
+        F_latent, z_q_list, indices_list, vq_loss_sum, stats = self.encode(x)
+        x_hat = self.decode(F_latent, indices_list)
 
         recon_loss = F.binary_cross_entropy_with_logits(x_hat, x)
         total_loss = recon_loss + vq_loss_sum
