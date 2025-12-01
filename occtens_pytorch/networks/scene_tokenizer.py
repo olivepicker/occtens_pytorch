@@ -98,7 +98,7 @@ class MultiScaleVQVAE(nn.Module):
             kernel_size=enc_kernel_size[::-1]
         )
 
-    def encode(self, x):
+    def encode(self, x, return_token_only=False):
         stats = {}
 
         f = self.encoder(x)  # (B, D, H_lat, W_lat), latent space
@@ -116,7 +116,7 @@ class MultiScaleVQVAE(nn.Module):
 
             z_q_s, idx_s, vq_loss_s, perplex_s = self.vq(f_hat)
 
-            z_q_list.append(z_q_s)          # (B, D, s, s)
+            z_q_list.append(z_q_s.view(B, D, -1))   # (B, D, s, s)
             indices_list.append(idx_s)      # (B, s, s)
             vq_loss_sum = vq_loss_sum + vq_loss_s
             
@@ -126,6 +126,9 @@ class MultiScaleVQVAE(nn.Module):
 
             stats[f"perplexity_s{s}"] = perplex_s.detach()
 
+        if return_token_only:
+            return torch.cat(z_q_list, dim=2)
+        
         return f, z_q_list, indices_list, vq_loss_sum, stats
 
     def decode(self, f, indices_list):
@@ -192,7 +195,7 @@ class Decoder(nn.Module):
         super().__init__()
         self.decoder = nn.Sequential(
             nn.Conv2d(latent_dim, hidden_channels, 
-                      kernel_size=kernel_size[0], padding=1),
+                      kernel_size=kernel_size[0], stride=1, padding=1),
             nn.ReLU(inplace=True),
 
             nn.ConvTranspose2d(hidden_channels, hidden_channels,
