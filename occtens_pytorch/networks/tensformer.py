@@ -95,6 +95,7 @@ class Decoder(nn.Module):
 
         return self.norm(tokens)
 
+#wip
 class TENSFormer(nn.Module):
     def __init__(
         self,
@@ -111,12 +112,27 @@ class TENSFormer(nn.Module):
         self.motion_tokenizer = motion_tokenizer
 
     def forward(self, scene, motion, context=None):
-        scene_token = self.scene_tokenizer(scene)
+        device = scene.device
+        B, T, C, H, W = scene.size()
+
+        scene = rearrange(scene('b t c h w -> (b t) c h w'))
+        scene_token, indices, _, _ = self.scene_tokenizer(scene)
+        scene_token = rearrange(scene_token('(b t) n d -> b t n d'))
         motion_token = self.motion_tokenizer(motion)
-        
-        attn_mask_temporal = None
-        attn_mask_spatial = None
+
+        ind = torch.cumsum(indices[0], dim=0)
+        max_col_for_row = torch.repeat_interleave(ind-1, ind)
+        N = max_col_for_row.shape[0]
+
+        col_idx = torch.arange(N, device=device)
+        scale_mask = col_idx.unsqueeze(0) <= max_col_for_row.unsqueeze(1)
+        time_idx = torch.arange(T, device=device)   # (T,)
+        time_mask = time_idx.unsqueeze(1) >= time_idx.unsqueeze(0)
+        attn_mask_temporal = time_mask[:, :, None, None] & scale_mask[None, None, :, :]
+        attn_mask_temporal = attn_mask_temporal.view(T * N, T * N)
+        attn_mask_spatial = scale_mask
         tokens = torch.cat([motion_token, scene_token], dim=-1)
+        
         out = self.decoder(tokens, context=context, attn_mask_temporal=attn_mask_temporal, attn_mask_spatial=attn_mask_spatial)
 
         return out
