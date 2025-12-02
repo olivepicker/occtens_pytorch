@@ -111,6 +111,7 @@ class TENSFormer(nn.Module):
         ff_mult=4,
     ):
         super().__init__()
+        self.bos_token = nn.Parameter(torch.randn(1, 1, dim))
         self.decoder = Decoder(dim, dim_head, num_heads, ff_mult)
         self.scene_tokenizer = scene_tokenizer
         self.motion_tokenizer = motion_tokenizer
@@ -138,7 +139,9 @@ class TENSFormer(nn.Module):
         attn_mask_temporal = time_mask[:, :, None, None] & scale_mask[None, None, :, :]
         attn_mask_temporal = attn_mask_temporal.view(T * N, T * N)
         attn_mask_spatial = scale_mask
-        tokens = torch.cat([motion_token, scene_token], dim=-1)
+
+        bos_token = self.bos_token.expand(B, -1, -1)
+        tokens = torch.cat([bos_token, motion_token, scene_token], dim=1)
 
         out = self.decoder(
             tokens, 
