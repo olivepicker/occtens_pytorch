@@ -27,9 +27,10 @@ class Attention(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x, context=None, attn_mask=None):
-
+        
+        B = x.size(0)
         if (attn_mask is not None) & (len(attn_mask.size())==2):
-            attn_mask = rearrange(attn_mask, 'h w -> 1 1 h w')
+            attn_mask = rearrange(attn_mask, 'h w -> b 1 h w', b=B)
 
         x = self.norm(x)
         x_kv = context if context is not None else x
@@ -83,20 +84,20 @@ class Decoder(nn.Module):
             FeedForward(dim=dim, mult=ff_mult)
         ]))
         
-    def forward(self, tokens, attn_mask_temporal, attn_mask_spatial):
-        B, T, N, D = tokens.size()
+    def forward(self, tokens, num_frames, attn_mask_temporal, attn_mask_spatial, context=None):
+        bos, x = tokens[:, :1, :], tokens[:, 1:, :]
+ 
         for temporal_attn, spatial_attn, ff in self.layers:
-            x = rearrange(tokens, 'b t n d -> b (t n) d')
             x = x + temporal_attn(x, attn_mask=attn_mask_temporal)
-            x = rearrange(x, 'b (t n) d -> b t n d', t=T)
+            x = rearrange(x, 'b (f t) d -> b f t d', f=num_frames)
 
-            x_frame = rearrange(x, 'b t n d -> (b t) n d')
+            x_frame = rearrange(x, 'b f t d -> (b f) t d', f=num_frames)
             x_frame = x_frame + spatial_attn(x_frame, attn_mask=attn_mask_spatial)
-            x = rearrange(x_frame, '(b t) n d -> b t n d', t=T)
+            x = rearrange(x_frame, '(b f) t d -> b (f t) d', f=num_frames)
 
             x = x + ff(x)
-            tokens = x
 
+        tokens = torch.cat([bos, x], dim=1) 
         return self.norm(tokens)
 
 #wip
@@ -116,38 +117,59 @@ class TENSFormer(nn.Module):
         self.scene_tokenizer = scene_tokenizer
         self.motion_tokenizer = motion_tokenizer
 
+        scene_num_embeddings = scene_tokenizer.num_codes
+        motion_num_embeddings = motion_tokenizer.n_x * motion_tokenizer.n_y * motion_tokenizer.n_t
+        
+        self.scene_embedding = nn.Embedding(scene_num_embeddings, dim)
+        self.motion_embedding = nn.Embedding(motion_num_embeddings, dim)
+
     def forward(self, scene, motion, context=None):
         device = scene.device
-        B, T, C, H, W = scene.size()
+        B, F, C, H, W = scene.size()
 
-        scene = rearrange(scene, 'b t c h w -> (b t) c h w')
-        scene_token, indices, _, _ = self.scene_tokenizer(scene)
-        scene_token = rearrange(scene_token, '(b t) n d -> b (t n) d', b=B)
+        scene = rearrange(scene, 'b f c h w -> (b f) c h w')
+        _, scene_token_list, _, _ = self.scene_tokenizer(scene)
+        scene_ids = torch.cat([rearrange(i, '(b f) h w -> b f (h w)', b=B, f=F) for i in scene_token_list], dim=2)
+        scene_tokens = self.scene_embedding(scene_ids)
 
-        motion = rearrange(motion, 'b t c n -> (b t) c n')
-        motion_token = self.motion_tokenizer(motion)
-        motion_token = rearrange(motion_token, '(b t) n d -> b (t n) d', b=B)
+        motion = rearrange(motion, 'b f c n -> (b f) c n')
+        motion_ids = self.motion_tokenizer(motion)
+        motion_ids = rearrange(motion_ids, '(b f) t -> b f t', b=B)
+        motion_tokens = self.motion_embedding(motion_ids)
 
-        ind = torch.cumsum(indices[0], dim=0)
-        max_col_for_row = torch.repeat_interleave(ind-1, ind)
-        N = max_col_for_row.shape[0]
+        scene_lengths = torch.tensor(
+            [s.shape[1] * s.shape[2] for s in scene_token_list],
+            device=device,
+            dtype=torch.long
+        )
+        lengths = torch.cat([
+            torch.tensor([motion_ids.shape[2]], device=device, dtype=torch.long),
+            scene_lengths
+        ], dim=0) 
 
+        ends = torch.cumsum(lengths, dim=0)
+        max_cols_per_scale = ends - 1
+        max_col_for_row = torch.repeat_interleave(max_cols_per_scale, lengths)
+
+        N = int(max_col_for_row.shape[0])
         col_idx = torch.arange(N, device=device)
         scale_mask = col_idx.unsqueeze(0) <= max_col_for_row.unsqueeze(1)
-        time_idx = torch.arange(T, device=device)   # (T,)
+        time_idx = torch.arange(F, device=device)   # (T,)
         time_mask = time_idx.unsqueeze(1) >= time_idx.unsqueeze(0)
         attn_mask_temporal = time_mask[:, :, None, None] & scale_mask[None, None, :, :]
-        attn_mask_temporal = attn_mask_temporal.view(T * N, T * N)
+        attn_mask_temporal = attn_mask_temporal.view(F * N, F * N)
         attn_mask_spatial = scale_mask
 
-        bos_token = self.bos_token.expand(B, -1, -1)
-        tokens = torch.cat([bos_token, motion_token, scene_token], dim=1)
+        tokens = torch.cat([motion_tokens, scene_tokens], dim=2)
+        bos_token = self.bos_token.expand(B, 1, -1)
+        tokens = torch.cat([bos_token, rearrange(tokens, 'b f t d -> b (f t) d')], dim=1)
 
         out = self.decoder(
-            tokens, 
-            context=context, 
+            tokens,
+            num_frames=F,
             attn_mask_temporal=attn_mask_temporal, 
-            attn_mask_spatial=attn_mask_spatial
+            attn_mask_spatial=attn_mask_spatial,
+            context=context
         )
 
         return out
@@ -160,5 +182,5 @@ class AutoRegressiveWrapper(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, batch):
+    def generate(self, batch):
         pass

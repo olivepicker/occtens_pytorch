@@ -63,8 +63,9 @@ class MultiScaleVQVAE(nn.Module):
         enc_kernel_size=[4,3,4,3]
     ):
         super().__init__()
-
+    
         self.scales = list(scales)
+        self.num_codes = num_codes
 
         # VQ
         self.vq = VectorQuantizer(num_codes=num_codes, code_dim=latent_dim)
