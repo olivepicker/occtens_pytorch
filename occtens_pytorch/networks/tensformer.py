@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from einops import rearrange
+from einops import rearrange, repeat
 
 class GEGLU(nn.Module):
     def forward(self, x):
@@ -30,7 +30,7 @@ class Attention(nn.Module):
         
         B = x.size(0)
         if (attn_mask is not None) & (len(attn_mask.size())==2):
-            attn_mask = rearrange(attn_mask, 'h w -> b 1 h w', b=B)
+            attn_mask = repeat(attn_mask, 'h w -> b 1 h w', b=B)
 
         x = self.norm(x)
         x_kv = context if context is not None else x
@@ -72,12 +72,13 @@ class Decoder(nn.Module):
         dim_head=64,
         num_heads=8,
         ff_mult=4,
+        num_layers=4
     ):
         super().__init__()
         self.layers = nn.ModuleList([])
         self.norm = nn.LayerNorm(dim)
 
-        for _ in range():
+        for _ in range(num_layers):
             self.layers.append(nn.ModuleList([
             Attention(dim=dim, dim_head=dim_head, num_heads=num_heads),
             Attention(dim=dim, dim_head=dim_head, num_heads=num_heads),
@@ -109,13 +110,18 @@ class TENSFormer(nn.Module):
         motion_tokenizer,
         dim_head=64,
         num_heads=8,
+        num_layers=4,
         ff_mult=4,
     ):
         super().__init__()
         self.bos_token = nn.Parameter(torch.randn(1, 1, dim))
-        self.decoder = Decoder(dim, dim_head, num_heads, ff_mult)
+        self.decoder = Decoder(dim, dim_head, num_heads, ff_mult, num_layers)
         self.scene_tokenizer = scene_tokenizer
         self.motion_tokenizer = motion_tokenizer
+
+        self.scene_tokenizer.eval()
+        for p in self.scene_tokenizer.parameters():
+            p.requires_grad_(False)
 
         scene_num_embeddings = scene_tokenizer.num_codes
         motion_num_embeddings = motion_tokenizer.n_x * motion_tokenizer.n_y * motion_tokenizer.n_t
@@ -128,7 +134,8 @@ class TENSFormer(nn.Module):
         B, F, C, H, W = scene.size()
 
         scene = rearrange(scene, 'b f c h w -> (b f) c h w')
-        _, scene_token_list, _, _ = self.scene_tokenizer(scene)
+        with torch.no_grad():
+            _, scene_token_list, _, _ = self.scene_tokenizer(scene)
         scene_ids = torch.cat([rearrange(i, '(b f) h w -> b f (h w)', b=B, f=F) for i in scene_token_list], dim=2)
         scene_tokens = self.scene_embedding(scene_ids)
 
@@ -154,7 +161,7 @@ class TENSFormer(nn.Module):
         N = int(max_col_for_row.shape[0])
         col_idx = torch.arange(N, device=device)
         scale_mask = col_idx.unsqueeze(0) <= max_col_for_row.unsqueeze(1)
-        time_idx = torch.arange(F, device=device)   # (T,)
+        time_idx = torch.arange(F, device=device)
         time_mask = time_idx.unsqueeze(1) >= time_idx.unsqueeze(0)
         attn_mask_temporal = time_mask[:, :, None, None] & scale_mask[None, None, :, :]
         attn_mask_temporal = attn_mask_temporal.view(F * N, F * N)
@@ -164,7 +171,7 @@ class TENSFormer(nn.Module):
         bos_token = self.bos_token.expand(B, 1, -1)
         tokens = torch.cat([bos_token, rearrange(tokens, 'b f t d -> b (f t) d')], dim=1)
 
-        out = self.decoder(
+        embedding = self.decoder(
             tokens,
             num_frames=F,
             attn_mask_temporal=attn_mask_temporal, 
@@ -172,15 +179,8 @@ class TENSFormer(nn.Module):
             context=context
         )
 
+        out = {
+            'embedding' : embedding
+        }
+        
         return out
-            
-class AutoRegressiveWrapper(nn.Module):
-    def __init__(
-        self,
-        model
-    ):
-        super().__init__()
-        self.model = model
-
-    def generate(self, batch):
-        pass
