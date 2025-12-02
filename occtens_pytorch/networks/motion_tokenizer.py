@@ -1,23 +1,38 @@
 import torch
 import torch.nn as nn
+import numpy as np
 
 #wip
 class MotionTokenizer(nn.Module):
-    def __init__(self, num_embeddings, embedding_dim):
-        self.x_q = UniformMotionQuantizer()
-        self.y_q = UniformMotionQuantizer()
+    def __init__(
+        self, 
+        embedding_dim,
+        x_range = (-10, 10),
+        y_range = (-10, 10),
+        t_range = (-np.pi, np.pi),
+        xyt_n_bins = (20, 20, 20)
+    ):
+        self.n_x, self.n_y, self.n_t = xyt_n_bins
+        num_embeddings = np.prod(xyt_n_bins)
+
+        self.x_q = UniformMotionQuantizer(x_range[0], x_range[1], self.n_x)
+        self.y_q = UniformMotionQuantizer(y_range[0], y_range[1], self.n_y)
+        self.t_q = UniformMotionQuantizer(t_range[0], t_range[1], self.n_t)
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
 
-    def forward(self, x, y, t):
+    def forward(self, xyt):
+        x, y, t = xyt[:,0,:], xyt[:,1,:], xyt[:,2,:]
         prod = self.cartesian_product(x, y, t)
         token = self.embedding(prod)
 
         return token
         
     def cartesian_product(self, x, y, t):
-        v_x = self.x_q(x)
-        v_y = self.y_q(y)
-        prod = x + y * v_x + t * v_x * v_y
+        i_x = self.x_q(x)
+        i_y = self.y_q(y)
+        i_t = self.t_q(t)
+
+        prod = i_x + (i_y * self.n_x) + (i_t * self.n_x * self.n_y) # x + y × Vx + θ × Vx × Vy
 
         return prod
 
@@ -31,5 +46,5 @@ class UniformMotionQuantizer:
     def __call__(self, v):
         v_clamped = torch.clamp(v, self.v_min, self.v_max - 1e-6)
         indices = torch.floor((v_clamped - self.v_min) / self.bin_width)
-        indices = indices.long()  # (B,)
-        return indices
+
+        return indices.long()

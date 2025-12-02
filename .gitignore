@@ -1,5 +1,7 @@
 # ext
 *.ipynb
+*.tgz
+*.zip
 
 # folder
 __pycache__

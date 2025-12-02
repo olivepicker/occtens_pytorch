@@ -27,6 +27,10 @@ class Attention(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x, context=None, attn_mask=None):
+
+        if (attn_mask is not None) & (len(attn_mask.size())==2):
+            attn_mask = rearrange(attn_mask, 'h w -> 1 1 h w')
+
         x = self.norm(x)
         x_kv = context if context is not None else x
 
@@ -115,10 +119,13 @@ class TENSFormer(nn.Module):
         device = scene.device
         B, T, C, H, W = scene.size()
 
-        scene = rearrange(scene('b t c h w -> (b t) c h w'))
+        scene = rearrange(scene, 'b t c h w -> (b t) c h w')
         scene_token, indices, _, _ = self.scene_tokenizer(scene)
-        scene_token = rearrange(scene_token('(b t) n d -> b t n d'))
+        scene_token = rearrange(scene_token, '(b t) n d -> b (t n) d', b=B)
+
+        motion = rearrange(motion, 'b t c n -> (b t) c n')
         motion_token = self.motion_tokenizer(motion)
+        motion_token = rearrange(motion_token, '(b t) n d -> b (t n) d', b=B)
 
         ind = torch.cumsum(indices[0], dim=0)
         max_col_for_row = torch.repeat_interleave(ind-1, ind)
@@ -132,8 +139,13 @@ class TENSFormer(nn.Module):
         attn_mask_temporal = attn_mask_temporal.view(T * N, T * N)
         attn_mask_spatial = scale_mask
         tokens = torch.cat([motion_token, scene_token], dim=-1)
-        
-        out = self.decoder(tokens, context=context, attn_mask_temporal=attn_mask_temporal, attn_mask_spatial=attn_mask_spatial)
+
+        out = self.decoder(
+            tokens, 
+            context=context, 
+            attn_mask_temporal=attn_mask_temporal, 
+            attn_mask_spatial=attn_mask_spatial
+        )
 
         return out
             
