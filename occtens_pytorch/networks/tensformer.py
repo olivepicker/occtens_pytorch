@@ -114,7 +114,13 @@ class TENSFormer(nn.Module):
         self.bos_token = nn.Parameter(torch.randn(1, 1, dim))
         self.decoder = Decoder(dim, dim_head, num_heads, ff_mult, num_layers)
 
-    def forward(self, scene_tokens, motion_tokens, lengths, context=None):
+    def forward(
+        self, 
+        scene_tokens, 
+        motion_tokens, 
+        lengths, 
+        context=None
+    ):
         B, F = scene_tokens.shape[:2]
         device = scene_tokens.device
         ends = torch.cumsum(lengths, dim=0)
@@ -142,8 +148,4 @@ class TENSFormer(nn.Module):
             context=context
         )
 
-        out = {
-            'embedding' : embedding
-        }
-
-        return out
+        return embedding

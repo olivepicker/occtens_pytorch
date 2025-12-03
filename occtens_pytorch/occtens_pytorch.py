@@ -1,4 +1,3 @@
-#wip
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -88,15 +87,32 @@ class OccTENS(nn.Module):
             device=device,
             dtype=torch.long
         )
+
+        motion_length = motion_ids.shape[2]
         lengths = torch.cat([
-            torch.tensor([motion_ids.shape[2]], device=device, dtype=torch.long),
+            torch.tensor([motion_length], device=device, dtype=torch.long),
             scene_lengths
         ], dim=0) 
 
-        ret = self.model(
+        embedding = self.model(
             scene_tokens = scene_tokens,
             motion_tokens = motion_tokens,
             lengths = lengths
-        )
+        ) # (batch, n_frame, token, dim)
 
-        return ret
+        token_emb = rearrange(embedding, 'b (f t) d -> b f t d', f=F)[:,:,1:,:]
+        token_length = int(lengths.sum().item())
+        token_type = torch.zeros((B, F, token_length), device=device, dtype=torch.long)
+        token_type[:, :, motion_length:] = 1
+        
+        out = {
+            'full_embedding': embedding,
+            'token_embedding': token_emb,
+            'token_ids': torch.cat([motion_ids, scene_ids], dim=2),
+            'scene_ids': scene_ids,
+            'motion_ids':motion_ids,
+            'token_type':token_type,
+            'frame_idx': torch.arange(F, device=device).view(1, F, 1).expand(B, F, token_length),
+        }
+
+        return out

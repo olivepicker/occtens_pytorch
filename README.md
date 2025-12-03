@@ -17,8 +17,9 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
     - [ ] Spatial Scale-by-scale Generation
     - [ ] Multi-modal Camera Pose Aggregation
     - [ ] Auto-Regressive Wrapper
-- [ ] **Tranining / Inference Pipeline**
-    - [ ] Implement Losses
+- [ ] **Train / Inference Pipeline**
+    - [x] Implement Losses
+    - [ ] Train base model
 
 ## Citations
 
