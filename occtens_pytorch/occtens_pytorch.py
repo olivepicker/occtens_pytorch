@@ -22,8 +22,8 @@ class OccTENS(nn.Module):
         scene_hidden_channels = 128,
         scene_latent_dim = 128,
         scene_num_codes = 4096,
-        scene_scales = (1,5,10,15,20,25),
-        scene_enc_kernel_size = [4,3,4,3],
+        scene_scales = (1, 5, 10, 15, 20, 25),
+        scene_enc_kernel_size = (4, 3, 4, 3),
         motion_x_range = (-10, 10),
         motion_y_range = (-10, 10),
         motion_t_range = (-np.pi, np.pi),
@@ -49,6 +49,7 @@ class OccTENS(nn.Module):
             t_range = motion_t_range,
             xyt_n_bins = motion_xyt_n_bins
         )
+
         self.model = TENSFormer(
             dim = dim,
             dim_head = dim_head,
@@ -61,12 +62,11 @@ class OccTENS(nn.Module):
         for p in self.scene_tokenizer.parameters():
             p.requires_grad_(False)
 
-        scene_num_embeddings = self.scene_tokenizer.num_codes
-        motion_num_embeddings = self.motion_tokenizer.n_x * self.motion_tokenizer.n_y * self.motion_tokenizer.n_t
+        self.dim = dim
+        self.motion_vocab_size = np.prod(motion_xyt_n_bins)
+        self.vocab_size = scene_num_codes + self.motion_vocab_size
+        self.token_embedding = nn.Embedding(self.vocab_size, dim)
         
-        self.scene_embedding = nn.Embedding(scene_num_embeddings, dim)
-        self.motion_embedding = nn.Embedding(motion_num_embeddings, dim)
-
     def forward(self, scene, motion):
         device = scene.device
         B, F, C, H, W = scene.size()
@@ -75,12 +75,13 @@ class OccTENS(nn.Module):
         with torch.no_grad():
             _, scene_token_list, _, _ = self.scene_tokenizer(scene)
         scene_ids = torch.cat([rearrange(i, '(b f) h w -> b f (h w)', b=B, f=F) for i in scene_token_list], dim=2)
-        scene_tokens = self.scene_embedding(scene_ids)
+        scene_ids += torch.tensor(self.motion_vocab_size)
+        scene_tokens = self.token_embedding(scene_ids)
 
         motion = rearrange(motion, 'b f c n -> (b f) c n')
         motion_ids = self.motion_tokenizer(motion)
         motion_ids = rearrange(motion_ids, '(b f) t -> b f t', b=B)
-        motion_tokens = self.motion_embedding(motion_ids)
+        motion_tokens = self.token_embedding(motion_ids)
 
         scene_lengths = torch.tensor(
             [s.shape[1] * s.shape[2] for s in scene_token_list],
@@ -100,7 +101,7 @@ class OccTENS(nn.Module):
             lengths = lengths
         ) # (batch, n_frame, token, dim)
 
-        token_emb = rearrange(embedding, 'b (f t) d -> b f t d', f=F)[:,:,1:,:]
+        token_emb = rearrange(embedding[:,1:,:], 'b (f t) d -> b f t d', f=F)
         token_length = int(lengths.sum().item())
         token_type = torch.zeros((B, F, token_length), device=device, dtype=torch.long)
         token_type[:, :, motion_length:] = 1
