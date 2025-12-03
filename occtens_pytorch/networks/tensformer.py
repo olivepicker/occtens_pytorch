@@ -101,13 +101,10 @@ class Decoder(nn.Module):
         tokens = torch.cat([bos, x], dim=1) 
         return self.norm(tokens)
 
-#wip
 class TENSFormer(nn.Module):
     def __init__(
         self,
         dim,
-        scene_tokenizer,
-        motion_tokenizer,
         dim_head=64,
         num_heads=8,
         num_layers=4,
@@ -116,44 +113,10 @@ class TENSFormer(nn.Module):
         super().__init__()
         self.bos_token = nn.Parameter(torch.randn(1, 1, dim))
         self.decoder = Decoder(dim, dim_head, num_heads, ff_mult, num_layers)
-        self.scene_tokenizer = scene_tokenizer
-        self.motion_tokenizer = motion_tokenizer
 
-        self.scene_tokenizer.eval()
-        for p in self.scene_tokenizer.parameters():
-            p.requires_grad_(False)
-
-        scene_num_embeddings = scene_tokenizer.num_codes
-        motion_num_embeddings = motion_tokenizer.n_x * motion_tokenizer.n_y * motion_tokenizer.n_t
-        
-        self.scene_embedding = nn.Embedding(scene_num_embeddings, dim)
-        self.motion_embedding = nn.Embedding(motion_num_embeddings, dim)
-
-    def forward(self, scene, motion, context=None):
-        device = scene.device
-        B, F, C, H, W = scene.size()
-
-        scene = rearrange(scene, 'b f c h w -> (b f) c h w')
-        with torch.no_grad():
-            _, scene_token_list, _, _ = self.scene_tokenizer(scene)
-        scene_ids = torch.cat([rearrange(i, '(b f) h w -> b f (h w)', b=B, f=F) for i in scene_token_list], dim=2)
-        scene_tokens = self.scene_embedding(scene_ids)
-
-        motion = rearrange(motion, 'b f c n -> (b f) c n')
-        motion_ids = self.motion_tokenizer(motion)
-        motion_ids = rearrange(motion_ids, '(b f) t -> b f t', b=B)
-        motion_tokens = self.motion_embedding(motion_ids)
-
-        scene_lengths = torch.tensor(
-            [s.shape[1] * s.shape[2] for s in scene_token_list],
-            device=device,
-            dtype=torch.long
-        )
-        lengths = torch.cat([
-            torch.tensor([motion_ids.shape[2]], device=device, dtype=torch.long),
-            scene_lengths
-        ], dim=0) 
-
+    def forward(self, scene_tokens, motion_tokens, lengths, context=None):
+        B, F = scene_tokens.shape[:2]
+        device = scene_tokens.device
         ends = torch.cumsum(lengths, dim=0)
         max_cols_per_scale = ends - 1
         max_col_for_row = torch.repeat_interleave(max_cols_per_scale, lengths)
@@ -182,5 +145,5 @@ class TENSFormer(nn.Module):
         out = {
             'embedding' : embedding
         }
-        
+
         return out
