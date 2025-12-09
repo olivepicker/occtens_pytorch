@@ -27,7 +27,6 @@ class Attention(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x, context=None, attn_mask=None):
-        
         B = x.size(0)
         if (attn_mask is not None) & (len(attn_mask.size())==2):
             attn_mask = repeat(attn_mask, 'h w -> b 1 h w', b=B)
@@ -36,9 +35,9 @@ class Attention(nn.Module):
         x_kv = context if context is not None else x
 
         q = self.q(x)
-        k, v = self.kv(x_kv).chunk(2, dim=-1)
-        
+        k, v = self.kv(x_kv).chunk(2, dim=-1)        
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.num_heads), (q, k, v))
+        q = q * self.scale
 
         sim = torch.einsum('b h i d, b h j d -> b h i j', q, k)
         if attn_mask is not None:

@@ -15,10 +15,15 @@ class SceneTokenizerTrainer(nn.Module):
         optimizer,
         train_ds,
         valid_ds,
-        device,
+        device='cuda',
         batch_size=4,
         num_workers=4,
-        lambda_rec=1.0, 
+        lambda_ce=10.0,
+        lambda_lovasz=1.0,
+        lambda_geoscal=0.3,
+        lambda_semscal=0.5,
+        ignore_index=0,
+        lambda_recon=1.0, 
         lambda_vq=1.0
     ):
         super().__init__()
@@ -47,8 +52,15 @@ class SceneTokenizerTrainer(nn.Module):
             drop_last=False,
         )
 
-        self.criterion = CustomSceneLoss()
-        self.lambda_rec = lambda_rec
+        self.criterion = CustomSceneLoss(
+            lambda_ce=lambda_ce,
+            lambda_geoscal=lambda_geoscal,
+            lambda_lovasz=lambda_lovasz,
+            lambda_semscal=lambda_semscal,
+            ignore_index=ignore_index
+        )
+
+        self.lambda_rec = lambda_recon
         self.lambda_vq = lambda_vq
 
     def train_one_step(self, batch):
@@ -118,8 +130,7 @@ class SceneTokenizerTrainer(nn.Module):
                 val_avg = val_loss_sum / max(1, len(self.valid_dl))
                 print(f"[Epoch {epoch+1}] val_loss={val_avg:.4f}")
         
-
-#wip
+        
 class OccTENSTrainer(nn.Module):
     def __init__(
         self, 
