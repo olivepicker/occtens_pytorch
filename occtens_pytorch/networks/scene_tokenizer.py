@@ -151,6 +151,7 @@ class MultiScaleVQVAE(nn.Module):
         recon_loss = F.binary_cross_entropy_with_logits(x_hat, x)
         total_loss = recon_loss + vq_loss_sum
 
+        stats['logits'] = x_hat
         stats["recon_loss"] = recon_loss.detach()
         stats["vq_loss"] = vq_loss_sum.detach()
 

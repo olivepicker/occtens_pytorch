@@ -1,6 +1,7 @@
 # ext
 *.ipynb
 *.tgz
+*.gz
 *.zip
 
 # folder
