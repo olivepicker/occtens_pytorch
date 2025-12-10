@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import os
 
-from torch.utils.data import Dataset, DataLoader
-
+from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast
 from einops import rearrange
 
 from loss import CustomSceneLoss
-from torch.cuda.amp import autocast
+
 
 class SceneTokenizerTrainer(nn.Module):
     def __init__(
@@ -17,7 +18,7 @@ class SceneTokenizerTrainer(nn.Module):
         train_ds,
         valid_ds,
         device='cuda',
-        autocast=True,
+        autocast_enabled=False,
         batch_size=4,
         num_workers=4,
         lambda_ce=10.0,
@@ -64,15 +65,15 @@ class SceneTokenizerTrainer(nn.Module):
 
         self.lambda_rec = lambda_recon
         self.lambda_vq = lambda_vq
-
-        self.autocast = autocast
+        self.best_val_loss = float('inf')
+        self.autocast_enabled = autocast_enabled
 
     def train_one_step(self, batch):
         self.model.train()
         self.optimizer.zero_grad()
         x = batch["semantic"].to(self.device)
 
-        with autocast(enabled=self.autocast):
+        with autocast(enabled=self.autocast_enabled):
             out = self.model(x)
         logits = out["logits"]
         vq_loss = out["vq_loss"]
@@ -95,7 +96,7 @@ class SceneTokenizerTrainer(nn.Module):
         with torch.no_grad():
             x = batch["semantic"].to(self.device)
 
-            with autocast(enabled=self.autocast):
+            with autocast(enabled=self.autocast_enabled):
                 out = self.model(x)
             logits = out["logits"]
             vq_loss = out["vq_loss"]
@@ -133,7 +134,16 @@ class SceneTokenizerTrainer(nn.Module):
                         val_loss_sum += log["loss_total"].item()
                 val_avg = val_loss_sum / max(1, len(self.valid_dl))
                 print(f"[Epoch {epoch+1}] val_loss={val_avg:.4f}")
-        
+
+                if val_avg < self.best_val_loss:
+                    print(f"Validation loss improved from {self.best_val_loss:.4f} to {val_avg:.4f}. Saving best model...")
+                    self.best_val_loss = val_avg
+                    
+                    save_path = os.path.join(self.save_dir, "best_model.pth")
+                    torch.save(self.model.state_dict(), save_path)
+                
+                last_path = os.path.join(self.save_dir, "last_model.pth")
+                torch.save(self.model.state_dict(), last_path)
 
 class OccTENSTrainer(nn.Module):
     def __init__(
