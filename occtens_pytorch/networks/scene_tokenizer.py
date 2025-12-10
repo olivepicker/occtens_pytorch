@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from einops import rearrange
+
 class VectorQuantizer(nn.Module):
     def __init__(
         self, 
@@ -145,17 +147,24 @@ class MultiScaleVQVAE(nn.Module):
         return recon
 
     def forward(self, x):
+        B, Z, Y, X = x.size()
+        y = x.clone()
+
+        x_one_hot = F.one_hot(x, num_classes=18)
+        x = rearrange(x_one_hot, 'b z y x c ->  b (z c) y x').float()
         F_latent, z_q_list, indices_list, vq_loss_sum, stats = self.encode(x)
         x_hat = self.decode(F_latent, indices_list)
 
         recon_loss = F.binary_cross_entropy_with_logits(x_hat, x)
-        total_loss = recon_loss + vq_loss_sum
+        #total_loss = recon_loss + vq_loss_sum
 
+        stats['x'] = rearrange(x_one_hot, 'b z y x c -> b c z y x')
+        stats['y'] = y
         stats['logits'] = x_hat
         stats["recon_loss"] = recon_loss.detach()
         stats["vq_loss"] = vq_loss_sum.detach()
 
-        return x_hat, indices_list, total_loss, stats
+        return stats
     
 class Encoder(nn.Module):
     def __init__(

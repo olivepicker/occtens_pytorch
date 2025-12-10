@@ -120,8 +120,7 @@ def mean(l, ignore_nan=False, empty=0):
 
 # geoscal, semscal Loss
 # https://github.com/astra-vision/MonoScene/blob/master/monoscene/loss/ssc_loss.py
-def geo_scal_loss(pred, ssc_target, ignore_index=0):
-
+def geo_scal_loss(pred, ssc_target, ignore_index=0, eps=1e-5):
     # Get softmax probabilities
     pred = F.softmax(pred, dim=1)
 
@@ -137,27 +136,25 @@ def geo_scal_loss(pred, ssc_target, ignore_index=0):
     empty_probs = empty_probs[mask]
 
     intersection = (nonempty_target * nonempty_probs).sum()
-    precision = intersection / nonempty_probs.sum()
-    recall = intersection / nonempty_target.sum()
-    spec = ((1 - nonempty_target) * (empty_probs)).sum() / (1 - nonempty_target).sum()
+    precision = intersection / (nonempty_probs.sum() + eps)
+    recall = intersection / (nonempty_target.sum() + eps)
+    spec = ((1 - nonempty_target) * (empty_probs)).sum() / ((1 - nonempty_target).sum() + eps)
     return (
         F.binary_cross_entropy(precision, torch.ones_like(precision))
         + F.binary_cross_entropy(recall, torch.ones_like(recall))
         + F.binary_cross_entropy(spec, torch.ones_like(spec))
     )
 
-def sem_scal_loss(pred, ssc_target, ignore_index=0):
+def sem_scal_loss(pred, ssc_target, ignore_index=0, n_classes=18):
     # Get softmax probabilities
     pred = F.softmax(pred, dim=1)
     loss = 0
     count = 0
     mask = ssc_target != ignore_index
-    n_classes = pred.shape[1]
-    for i in range(0, n_classes):
-
+    for i in range(n_classes):
         # Get probability of class i
         p = pred[:, i, :, :, :]
-
+        
         # Remove unknown voxels
         target_ori = ssc_target
         p = p[mask]
@@ -197,6 +194,7 @@ def sem_scal_loss(pred, ssc_target, ignore_index=0):
 class CustomSceneLoss(nn.Module):
     def __init__(
         self,
+        num_classes: int = 18,
         lambda_ce: float = 10.0,
         lambda_lovasz: float = 1.0,
         lambda_geoscal: float = 0.3,
@@ -205,6 +203,7 @@ class CustomSceneLoss(nn.Module):
         ce_class_weights: torch.Tensor | None = None,
     ):
         super().__init__()
+        self.num_classes = num_classes
         self.lambda_ce = lambda_ce
         self.lambda_lovasz = lambda_lovasz
         self.lambda_geoscal = lambda_geoscal
@@ -217,18 +216,18 @@ class CustomSceneLoss(nn.Module):
         )
 
     def forward(self, logits, target):
-        """
-        logits: (B, C, Z, Y, X)
-        target: (B, Z, Y, X)  with ignore_index for unknown
-        """
-        B, C, Z, Y, X = logits.shape
-        L_ce = self.ce_loss(logits, target)
+        B, Cz, Y, X = logits.shape
+        C = self.num_classes
+        Z = Cz // C
+        assert Cz == C * Z, f"Channel dim {Cz} != num_classes({C}) * num_z({Z})"
 
-        logits_2d = logits.permute(0, 2, 1, 3, 4).contiguous()   # (B, Z, C, Y, X)
-        logits_2d = logits_2d.view(B * Z, C, Y, X)               # (B*Z, C, Y, X)
+        logits_3d = logits.view(B, Z, C, Y, X).permute(0, 2, 1, 3, 4).contiguous()
+        L_ce = self.ce_loss(logits_3d, target)
 
-        target_2d = target.permute(0, 1, 2, 3).contiguous()      # (B, Z, Y, X)
-        target_2d = target_2d.view(B * Z, Y, X)                  # (B*Z, Y, X)
+        logits_2d = logits_3d.permute(0, 2, 1, 3, 4).contiguous()   # (B, Z, C, Y, X)
+        logits_2d = logits_2d.view(B * Z, C, Y, X)
+
+        target_2d = target.view(B * Z, Y, X)                        # (B*Z, Y, X)
 
         probas_2d = F.softmax(logits_2d, dim=1)
         L_lovasz = lovasz_softmax(
@@ -240,15 +239,16 @@ class CustomSceneLoss(nn.Module):
         )
 
         L_geoscal = geo_scal_loss(
-            logits,
+            logits_3d,
             target,
             ignore_index=self.ignore_index
         )
 
         L_semscal = sem_scal_loss(
-            logits,
+            logits_3d,
             target,
-            ignore_index=self.ignore_index
+            ignore_index=self.ignore_index,
+            n_classes = self.num_classes
         )
 
         loss = (

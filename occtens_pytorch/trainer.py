@@ -7,6 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 from einops import rearrange
 
 from loss import CustomSceneLoss
+from torch.cuda.amp import autocast
 
 class SceneTokenizerTrainer(nn.Module):
     def __init__(
@@ -16,6 +17,7 @@ class SceneTokenizerTrainer(nn.Module):
         train_ds,
         valid_ds,
         device='cuda',
+        autocast=True,
         batch_size=4,
         num_workers=4,
         lambda_ce=10.0,
@@ -28,7 +30,7 @@ class SceneTokenizerTrainer(nn.Module):
     ):
         super().__init__()
 
-        self.model = model
+        self.model = model.to(device)
         self.optimizer = optimizer
         self.device = device
 
@@ -63,17 +65,19 @@ class SceneTokenizerTrainer(nn.Module):
         self.lambda_rec = lambda_recon
         self.lambda_vq = lambda_vq
 
+        self.autocast = autocast
+
     def train_one_step(self, batch):
         self.model.train()
         self.optimizer.zero_grad()
-        x = batch["input"].to(self.device)
-        target = batch["target"].to(self.device)
+        x = batch["semantic"].to(self.device)
 
-        out = self.model(x)
+        with autocast(enabled=self.autocast):
+            out = self.model(x)
         logits = out["logits"]
         vq_loss = out["vq_loss"]
         
-        loss_dict = self.criterion(logits, target)
+        loss_dict = self.criterion(logits, out['y'])
         rec_loss = loss_dict["loss"]
         
         total_loss = self.lambda_rec * rec_loss + self.lambda_vq * vq_loss
@@ -89,14 +93,14 @@ class SceneTokenizerTrainer(nn.Module):
     def valid_one_step(self, batch):
         self.model.eval()
         with torch.no_grad():
-            x = batch["input"].to(self.device)
-            target = batch["target"].to(self.device)
+            x = batch["semantic"].to(self.device)
 
-            out = self.model(x)
+            with autocast(enabled=self.autocast):
+                out = self.model(x)
             logits = out["logits"]
             vq_loss = out["vq_loss"]
             
-            loss_dict = self.criterion(logits, target)
+            loss_dict = self.criterion(logits, out['y'])
             rec_loss = loss_dict["loss"]
             
             total_loss = self.lambda_rec * rec_loss + self.lambda_vq * vq_loss
@@ -130,7 +134,7 @@ class SceneTokenizerTrainer(nn.Module):
                 val_avg = val_loss_sum / max(1, len(self.valid_dl))
                 print(f"[Epoch {epoch+1}] val_loss={val_avg:.4f}")
         
-        
+
 class OccTENSTrainer(nn.Module):
     def __init__(
         self, 
