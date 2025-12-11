@@ -4,7 +4,6 @@ import torch.nn.functional as F
 import os
 
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast
 from einops import rearrange
 
 from loss import CustomSceneLoss
@@ -19,6 +18,8 @@ class SceneTokenizerTrainer(nn.Module):
         valid_ds,
         device='cuda',
         autocast_enabled=False,
+        autocast_device_type='cuda',
+        autocast_dtype=torch.bfloat16,
         batch_size=4,
         num_workers=4,
         lambda_ce=10.0,
@@ -27,7 +28,8 @@ class SceneTokenizerTrainer(nn.Module):
         lambda_semscal=0.5,
         ignore_index=0,
         lambda_recon=1.0, 
-        lambda_vq=1.0
+        lambda_vq=1.0,
+        save_path = 'scene_output/'
     ):
         super().__init__()
 
@@ -66,14 +68,23 @@ class SceneTokenizerTrainer(nn.Module):
         self.lambda_rec = lambda_recon
         self.lambda_vq = lambda_vq
         self.best_val_loss = float('inf')
-        self.autocast_enabled = autocast_enabled
+
+        self.autocast_config = {
+            'device_type':autocast_device_type,
+            'dtype':autocast_dtype,
+            'enabled':autocast_enabled
+        }
+
+        self.save_path = save_path
+        if os.path.exists(self.save_path)==False:
+            os.makedirs(self.save_path)
 
     def train_one_step(self, batch):
         self.model.train()
         self.optimizer.zero_grad()
         x = batch["semantic"].to(self.device)
 
-        with autocast(enabled=self.autocast_enabled):
+        with torch.autocast(**self.autocast_config):
             out = self.model(x)
         logits = out["logits"]
         vq_loss = out["vq_loss"]
@@ -96,7 +107,7 @@ class SceneTokenizerTrainer(nn.Module):
         with torch.no_grad():
             x = batch["semantic"].to(self.device)
 
-            with autocast(enabled=self.autocast_enabled):
+            with torch.autocast(**self.autocast_config):
                 out = self.model(x)
             logits = out["logits"]
             vq_loss = out["vq_loss"]
@@ -139,10 +150,10 @@ class SceneTokenizerTrainer(nn.Module):
                     print(f"Validation loss improved from {self.best_val_loss:.4f} to {val_avg:.4f}. Saving best model...")
                     self.best_val_loss = val_avg
                     
-                    save_path = os.path.join(self.save_dir, "best_model.pth")
+                    save_path = os.path.join(self.save_path, "best_model.pth")
                     torch.save(self.model.state_dict(), save_path)
                 
-                last_path = os.path.join(self.save_dir, "last_model.pth")
+                last_path = os.path.join(self.save_path, "last_model.pth")
                 torch.save(self.model.state_dict(), last_path)
 
 class OccTENSTrainer(nn.Module):

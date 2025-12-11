@@ -238,6 +238,7 @@ class CustomSceneLoss(nn.Module):
             ignore=self.ignore_index
         )
 
+        #FIXME geo_scal_loss causes NaN - something divided with zero, eps added for prevent error
         L_geoscal = geo_scal_loss(
             logits_3d,
             target,
