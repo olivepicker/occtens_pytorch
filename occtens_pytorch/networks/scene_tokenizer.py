@@ -62,7 +62,7 @@ class MultiScaleVQVAE(nn.Module):
         latent_dim: int = 128,
         num_codes: int = 4096,
         scales=(1,5,10,15,20,25),
-        enc_kernel_size=[4,3,4,3]
+        enc_kernel_size=[4,4,4,3]
     ):
         super().__init__()
     
@@ -172,16 +172,21 @@ class Encoder(nn.Module):
         in_channels: int, 
         hidden_channels: int,
         latent_dim: int,
-        kernel_size = [4,3,4,3],
+        kernel_size = [3,4,4,4],
     ):
         super().__init__()
+        self.comp = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels // 2, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(hidden_channels // 2),
+            nn.ReLU(inplace=True)
+        )
         self.encoder = nn.Sequential(
-            nn.Conv2d(in_channels, hidden_channels // 2, 
+            nn.Conv2d(hidden_channels // 2, hidden_channels, 
                       kernel_size=kernel_size[0], stride=2, padding=1),
             nn.ReLU(inplace=True),
 
-            nn.Conv2d(hidden_channels // 2, hidden_channels, 
-                      kernel_size=kernel_size[1], stride=1, padding=1),
+            nn.Conv2d(hidden_channels, hidden_channels, 
+                      kernel_size=kernel_size[1], stride=2, padding=1),
             nn.ReLU(inplace=True),
 
             nn.Conv2d(hidden_channels, hidden_channels, 
@@ -193,7 +198,10 @@ class Encoder(nn.Module):
         )
 
     def forward(self, x):
-        return self.encoder(x)
+        x = self.comp(x)
+        x = self.encoder(x)
+
+        return x
     
 class Decoder(nn.Module):
     def __init__(
@@ -201,9 +209,10 @@ class Decoder(nn.Module):
         in_channels: int, 
         hidden_channels: int,
         latent_dim: int,
-        kernel_size = [3,4,3,4]
+        kernel_size = [4,4,3,4]
     ):
         super().__init__()
+
         self.decoder = nn.Sequential(
             nn.Conv2d(latent_dim, hidden_channels, 
                       kernel_size=kernel_size[0], stride=1, padding=1),
@@ -213,13 +222,17 @@ class Decoder(nn.Module):
                                kernel_size=kernel_size[1], stride=2, padding=1),
             nn.ReLU(inplace=True),
 
-            nn.ConvTranspose2d(hidden_channels, hidden_channels // 2,
-                               kernel_size=kernel_size[2], stride=1, padding=1),
+            nn.ConvTranspose2d(hidden_channels, hidden_channels,
+                               kernel_size=kernel_size[2], stride=2, padding=1),
             nn.ReLU(inplace=True),
 
-            nn.ConvTranspose2d(hidden_channels // 2, in_channels, 
+            nn.ConvTranspose2d(hidden_channels, hidden_channels  // 2, 
                                kernel_size=kernel_size[3], stride=2, padding=1),
         )
+        self.decomp = nn.Conv2d(hidden_channels // 2, in_channels, kernel_size=1)
 
     def forward(self, x):
-        return self.decoder(x)
+        x = self.decoder(x)
+        x = self.decomp(x)
+
+        return x

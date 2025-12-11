@@ -26,7 +26,7 @@ class SceneTokenizerTrainer(nn.Module):
         lambda_lovasz=1.0,
         lambda_geoscal=0.3,
         lambda_semscal=0.5,
-        ignore_index=0,
+        ignore_index=255,
         lambda_recon=1.0, 
         lambda_vq=1.0,
         save_path = 'scene_output/'

@@ -127,6 +127,7 @@ def geo_scal_loss(pred, ssc_target, ignore_index=0, eps=1e-5):
     # Compute empty and nonempty probabilities
     empty_probs = pred[:, 0, :, :, :]
     nonempty_probs = 1 - empty_probs
+    nonempty_probs = torch.clamp(nonempty_probs, min=1e-7, max=1.0 - 1e-7)
 
     # Remove unknown voxels
     mask = ssc_target != ignore_index
@@ -136,9 +137,9 @@ def geo_scal_loss(pred, ssc_target, ignore_index=0, eps=1e-5):
     empty_probs = empty_probs[mask]
 
     intersection = (nonempty_target * nonempty_probs).sum()
-    precision = intersection / (nonempty_probs.sum() + eps)
-    recall = intersection / (nonempty_target.sum() + eps)
-    spec = ((1 - nonempty_target) * (empty_probs)).sum() / ((1 - nonempty_target).sum() + eps)
+    precision = intersection / (nonempty_probs.sum())
+    recall = intersection / (nonempty_target.sum())
+    spec = ((1 - nonempty_target) * (empty_probs)).sum() / ((1 - nonempty_target).sum())
     return (
         F.binary_cross_entropy(precision, torch.ones_like(precision))
         + F.binary_cross_entropy(recall, torch.ones_like(recall))
@@ -199,7 +200,7 @@ class CustomSceneLoss(nn.Module):
         lambda_lovasz: float = 1.0,
         lambda_geoscal: float = 0.3,
         lambda_semscal: float = 0.5,
-        ignore_index: int = 0,
+        ignore_index: int = 255,
         ce_class_weights: torch.Tensor | None = None,
     ):
         super().__init__()
@@ -238,7 +239,6 @@ class CustomSceneLoss(nn.Module):
             ignore=self.ignore_index
         )
 
-        #FIXME geo_scal_loss causes NaN - something divided with zero, eps added for prevent error
         L_geoscal = geo_scal_loss(
             logits_3d,
             target,
