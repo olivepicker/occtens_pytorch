@@ -21,6 +21,30 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
     - [x] Implement Losses
     - [ ] Train base model
 
+## Usage
+```python
+# Train Scene Tokenizer
+
+from networks.scene_tokenizer import MultiScaleVQVAE
+from trainer import SceneTokenizerTrainer
+...
+
+m = MultiScaleVQVAE(
+    in_channels=288
+)
+
+trainer = SceneTokenizerTrainer(
+    model=m,
+    optimizer = torch.optim.AdamW(lr=1e-4,params=m.parameters()),
+    train_ds = train_ds,
+    valid_ds = valid_ds,
+    batch_size = 32,
+    device = 'cuda',
+)
+
+trainer.train(num_epochs=200)
+```
+
 ## Citations
 
 ```bibtex
