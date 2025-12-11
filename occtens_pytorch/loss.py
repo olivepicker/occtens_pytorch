@@ -118,79 +118,86 @@ def mean(l, ignore_nan=False, empty=0):
         return acc
     return acc / n
 
-# geoscal, semscal Loss
-# https://github.com/astra-vision/MonoScene/blob/master/monoscene/loss/ssc_loss.py
 def geo_scal_loss(pred, ssc_target, ignore_index=0, eps=1e-5):
-    # Get softmax probabilities
     pred = F.softmax(pred, dim=1)
-
-    # Compute empty and nonempty probabilities
+    
     empty_probs = pred[:, 0, :, :, :]
     nonempty_probs = 1 - empty_probs
     nonempty_probs = torch.clamp(nonempty_probs, min=1e-7, max=1.0 - 1e-7)
 
-    # Remove unknown voxels
     mask = ssc_target != ignore_index
-    nonempty_target = ssc_target != 0
-    nonempty_target = nonempty_target[mask].float()
+    nonempty_target = (ssc_target != 0).float()
+    
+    nonempty_target = nonempty_target[mask]
     nonempty_probs = nonempty_probs[mask]
     empty_probs = empty_probs[mask]
 
     intersection = (nonempty_target * nonempty_probs).sum()
-    precision = intersection / (nonempty_probs.sum())
-    recall = intersection / (nonempty_target.sum())
-    spec = ((1 - nonempty_target) * (empty_probs)).sum() / ((1 - nonempty_target).sum())
-    return (
-        F.binary_cross_entropy(precision, torch.ones_like(precision))
-        + F.binary_cross_entropy(recall, torch.ones_like(recall))
-        + F.binary_cross_entropy(spec, torch.ones_like(spec))
-    )
+    
+    prec_denom = nonempty_probs.sum() + eps
+    recall_denom = nonempty_target.sum() + eps
+    spec_denom = (1 - nonempty_target).sum() + eps
+    
+    precision = intersection / prec_denom
+    recall = intersection / recall_denom
+    spec = ((1 - nonempty_target) * empty_probs).sum() / spec_denom
 
-def sem_scal_loss(pred, ssc_target, ignore_index=0, n_classes=18):
-    # Get softmax probabilities
+    loss_precision = -torch.log(precision + eps)
+    loss_recall = -torch.log(recall + eps)
+    loss_spec = -torch.log(spec + eps)
+
+    return loss_precision + loss_recall + loss_spec
+
+def sem_scal_loss(pred, ssc_target, ignore_index=0, n_classes=18, eps=1e-5):
     pred = F.softmax(pred, dim=1)
-    loss = 0
-    count = 0
     mask = ssc_target != ignore_index
+    
+    p_masked = pred.permute(0, 2, 3, 4, 1)[mask] # (N_valid, C)
+    target_masked = ssc_target[mask]             # (N_valid,)
+
+    loss = 0.0
+    count = 0.0
+
     for i in range(n_classes):
-        # Get probability of class i
-        p = pred[:, i, :, :, :]
+
+        p_i = p_masked[:, i]
+        target_i = (target_masked == i).float()
         
-        # Remove unknown voxels
-        target_ori = ssc_target
-        p = p[mask]
-        target = ssc_target[mask]
+        sum_target = torch.sum(target_i)
+        sum_p = torch.sum(p_i)
+        
+        if sum_target < eps and sum_p < eps:
+            continue
+            
+        intersection = torch.sum(p_i * target_i)
+        
+        loss_class = 0.0
+        
+        if sum_p > eps:
+            precision = intersection / (sum_p + eps)
+            precision = torch.clamp(precision, min=eps, max=1.0)
+            loss_class += -torch.log(precision)
 
-        completion_target = torch.ones_like(target)
-        completion_target[target != i] = 0
-        completion_target_ori = torch.ones_like(target_ori).float()
-        completion_target_ori[target_ori != i] = 0
-        if torch.sum(completion_target) > 0:
-            count += 1.0
-            nominator = torch.sum(p * completion_target)
-            loss_class = 0
-            if torch.sum(p) > 0:
-                precision = nominator / (torch.sum(p))
-                loss_precision = F.binary_cross_entropy(
-                    precision, torch.ones_like(precision)
-                )
-                loss_class += loss_precision
-            if torch.sum(completion_target) > 0:
-                recall = nominator / (torch.sum(completion_target))
-                loss_recall = F.binary_cross_entropy(recall, torch.ones_like(recall))
-                loss_class += loss_recall
-            if torch.sum(1 - completion_target) > 0:
-                specificity = torch.sum((1 - p) * (1 - completion_target)) / (
-                    torch.sum(1 - completion_target)
-                )
-                loss_specificity = F.binary_cross_entropy(
-                    specificity, torch.ones_like(specificity)
-                )
-                loss_class += loss_specificity
-            loss += loss_class
-    return loss / count
+        if sum_target > eps:
+            recall = intersection / (sum_target + eps)
+            recall = torch.clamp(recall, min=eps, max=1.0)
+            loss_class += -torch.log(recall)
 
-# Scene Tokenizer Loss Wrapper
+        inverse_target = 1.0 - target_i
+        sum_inverse_target = torch.sum(inverse_target)
+        
+        if sum_inverse_target > eps:
+            specificity = torch.sum((1.0 - p_i) * inverse_target) / (sum_inverse_target + eps)
+            specificity = torch.clamp(specificity, min=eps, max=1.0)
+            loss_class += -torch.log(specificity)
+
+        loss += loss_class
+        count += 1.0
+
+    if count > 0:
+        return loss / count
+    else:
+        return torch.tensor(0.0, device=pred.device, requires_grad=True)
 
 class CustomSceneLoss(nn.Module):
     def __init__(

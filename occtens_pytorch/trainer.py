@@ -19,7 +19,7 @@ class SceneTokenizerTrainer(nn.Module):
         device='cuda',
         autocast_enabled=False,
         autocast_device_type='cuda',
-        autocast_dtype=torch.bfloat16,
+        autocast_dtype=torch.float16,
         batch_size=4,
         num_workers=4,
         lambda_ce=10.0,
@@ -86,11 +86,11 @@ class SceneTokenizerTrainer(nn.Module):
 
         with torch.autocast(**self.autocast_config):
             out = self.model(x)
-        logits = out["logits"]
-        vq_loss = out["vq_loss"]
-        
-        loss_dict = self.criterion(logits, out['y'])
-        rec_loss = loss_dict["loss"]
+            logits = out["logits"]
+            vq_loss = out["vq_loss"]
+            
+            loss_dict = self.criterion(logits, out['y'])
+            rec_loss = loss_dict["loss"]
         
         total_loss = self.lambda_rec * rec_loss + self.lambda_vq * vq_loss
         total_loss.backward()
@@ -109,11 +109,11 @@ class SceneTokenizerTrainer(nn.Module):
 
             with torch.autocast(**self.autocast_config):
                 out = self.model(x)
-            logits = out["logits"]
-            vq_loss = out["vq_loss"]
-            
-            loss_dict = self.criterion(logits, out['y'])
-            rec_loss = loss_dict["loss"]
+                logits = out["logits"]
+                vq_loss = out["vq_loss"]
+                
+                loss_dict = self.criterion(logits, out['y'])
+                rec_loss = loss_dict["loss"]
             
             total_loss = self.lambda_rec * rec_loss + self.lambda_vq * vq_loss
 
