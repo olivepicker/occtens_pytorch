@@ -3,6 +3,7 @@ from __future__ import print_function, division
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
+from einops import rearrange
 import torch.nn.functional as F
 import numpy as np
 try:
@@ -229,12 +230,11 @@ class CustomSceneLoss(nn.Module):
         Z = Cz // C
         assert Cz == C * Z, f"Channel dim {Cz} != num_classes({C}) * num_z({Z})"
 
-        logits_3d = logits.view(B, Z, C, Y, X).permute(0, 2, 1, 3, 4).contiguous()
+        logits_2d = rearrange(logits, 'b (z c) y x -> b z c y x', c=C).contiguous()
+        logits_3d = rearrange(logits_2d, 'b z c y x -> b c z y x').contiguous()
         L_ce = self.ce_loss(logits_3d, target)
 
-        logits_2d = logits_3d.permute(0, 2, 1, 3, 4).contiguous()   # (B, Z, C, Y, X)
-        logits_2d = logits_2d.view(B * Z, C, Y, X)
-
+        logits_2d = rearrange(logits_2d, 'b z c y x -> (b z) c y x')
         target_2d = target.view(B * Z, Y, X)                        # (B*Z, Y, X)
 
         probas_2d = F.softmax(logits_2d, dim=1)

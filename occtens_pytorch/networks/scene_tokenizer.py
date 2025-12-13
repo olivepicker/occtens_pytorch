@@ -155,14 +155,14 @@ class MultiScaleVQVAE(nn.Module):
         F_latent, z_q_list, indices_list, vq_loss_sum, stats = self.encode(x)
         x_hat = self.decode(F_latent, indices_list)
 
-        recon_loss = F.binary_cross_entropy_with_logits(x_hat, x)
+        #recon_loss = F.binary_cross_entropy_with_logits(logit, targets.float())
         #total_loss = recon_loss + vq_loss_sum
 
         stats['x'] = rearrange(x_one_hot, 'b z y x c -> b c z y x')
         stats['y'] = y
         stats['logits'] = x_hat
-        stats["recon_loss"] = recon_loss.detach()
-        stats["vq_loss"] = vq_loss_sum.detach()
+        #stats["recon_loss"] = recon_loss.detach()
+        #stats["vq_loss"] = vq_loss_sum.detach()
 
         return stats
     
