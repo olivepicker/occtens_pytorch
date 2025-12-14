@@ -62,7 +62,8 @@ class SceneTokenizerTrainer(nn.Module):
             lambda_geoscal=lambda_geoscal,
             lambda_lovasz=lambda_lovasz,
             lambda_semscal=lambda_semscal,
-            ignore_index=ignore_index
+            ignore_index=ignore_index,
+            num_classes=19,
         )
 
         self.lambda_rec = lambda_recon

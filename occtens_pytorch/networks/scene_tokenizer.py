@@ -150,7 +150,7 @@ class MultiScaleVQVAE(nn.Module):
         B, Z, Y, X = x.size()
         y = x.clone()
 
-        x_one_hot = F.one_hot(x, num_classes=18)
+        x_one_hot = F.one_hot(x, num_classes=19)
         x = rearrange(x_one_hot, 'b z y x c ->  b (z c) y x').float()
         F_latent, z_q_list, indices_list, vq_loss_sum, stats = self.encode(x)
         x_hat = self.decode(F_latent, indices_list)

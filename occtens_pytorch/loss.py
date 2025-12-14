@@ -235,7 +235,7 @@ class CustomSceneLoss(nn.Module):
         L_ce = self.ce_loss(logits_3d, target)
 
         logits_2d = rearrange(logits_2d, 'b z c y x -> (b z) c y x')
-        target_2d = target.view(B * Z, Y, X)                        # (B*Z, Y, X)
+        target_2d = rearrange(target, 'b z y x -> (b z) y x')
 
         probas_2d = F.softmax(logits_2d, dim=1)
         L_lovasz = lovasz_softmax(
