@@ -88,19 +88,16 @@ class SceneTokenizerTrainer(nn.Module):
         with torch.autocast(**self.autocast_config):
             out = self.model(x)
             logits = out["logits"]
-            #vq_loss = out["vq_loss"]
             
             loss_dict = self.criterion(logits, out['y'])
             rec_loss = loss_dict["loss"]
         
-        total_loss = self.lambda_rec * rec_loss #+ self.lambda_vq * vq_loss
+        total_loss = rec_loss
         total_loss.backward()
         self.optimizer.step()
 
         return {
             "loss_total": total_loss.detach(),
-            "loss_rec": rec_loss.detach(),
-            #"loss_vq": vq_loss.detach(),
         }
 
     def valid_one_step(self, batch):
@@ -111,17 +108,14 @@ class SceneTokenizerTrainer(nn.Module):
             with torch.autocast(**self.autocast_config):
                 out = self.model(x)
                 logits = out["logits"]
-                #vq_loss = out["vq_loss"]
                 
                 loss_dict = self.criterion(logits, out['y'])
                 rec_loss = loss_dict["loss"]
             
-            total_loss = self.lambda_rec * rec_loss #+ self.lambda_vq * vq_loss
+            total_loss = rec_loss
 
         return {
             "loss_total": total_loss,
-            "loss_rec": rec_loss,
-            #"loss_vq": vq_loss,
         }
     
     def train(self, num_epochs, log_interval=50, val_interval=1):

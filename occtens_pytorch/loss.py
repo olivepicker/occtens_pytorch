@@ -119,15 +119,15 @@ def mean(l, ignore_nan=False, empty=0):
         return acc
     return acc / n
 
-def geo_scal_loss(pred, ssc_target, ignore_index=0, eps=1e-5):
+def geo_scal_loss(pred, ssc_target, ignore_index=0, free_class=17, eps=1e-5):
     pred = F.softmax(pred, dim=1)
     
-    empty_probs = pred[:, 17, :, :, :] # free class
+    empty_probs = pred[:, free_class, :, :, :] # free class
     nonempty_probs = 1 - empty_probs
     nonempty_probs = torch.clamp(nonempty_probs, min=1e-7, max=1.0 - 1e-7)
 
     mask = ssc_target != ignore_index
-    nonempty_target = (ssc_target != 0).float()
+    nonempty_target = (ssc_target != free_class).float()
     
     nonempty_target = nonempty_target[mask]
     nonempty_probs = nonempty_probs[mask]

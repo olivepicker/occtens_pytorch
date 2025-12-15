@@ -136,15 +136,13 @@ class MultiScaleVQVAE(nn.Module):
 
     def decode(self, f, indices_list):
         B, D, H_lat, W_lat = f.shape
-        f = torch.zeros_like(f)
 
         for idx, idx_s in enumerate(indices_list):
             z = self.vq.codebook(idx_s).permute(0,3,1,2)
             z = F.interpolate(z, size=(H_lat, W_lat), mode="bicubic").contiguous()
             f = f + self.phi_dec[idx](z)
 
-        recon = self.decoder(f)
-        return recon
+        return self.decoder(f)
 
     def forward(self, x):
         B, Z, Y, X = x.size()
