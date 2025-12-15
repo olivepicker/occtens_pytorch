@@ -62,7 +62,7 @@ def lovasz_softmax_flat(probas, labels, classes='present'):
     class_to_sum = list(range(C)) if classes in ['all', 'present'] else classes
     for c in class_to_sum:
         fg = (labels == c).float() # foreground for class c
-        if (classes is 'present' and fg.sum() == 0):
+        if (classes == 'present' and fg.sum() == 0):
             continue
         if C == 1:
             if len(classes) > 1:
@@ -122,7 +122,7 @@ def mean(l, ignore_nan=False, empty=0):
 def geo_scal_loss(pred, ssc_target, ignore_index=0, eps=1e-5):
     pred = F.softmax(pred, dim=1)
     
-    empty_probs = pred[:, 0, :, :, :]
+    empty_probs = pred[:, 17, :, :, :] # free class
     nonempty_probs = 1 - empty_probs
     nonempty_probs = torch.clamp(nonempty_probs, min=1e-7, max=1.0 - 1e-7)
 
