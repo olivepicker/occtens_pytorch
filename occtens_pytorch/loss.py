@@ -231,15 +231,18 @@ class CustomSceneLoss(nn.Module):
         C = self.num_classes
         Z = Cz // C
         #assert Cz == C * Z, f"Channel dim {Cz} != num_classes({C}) * num_z({Z})"
-
-        logits_3d = rearrange(logits, '(b c) z y x -> b c z y x', c=C).contiguous()
+        logits_2d = rearrange(logits, 'b (z c) y x -> b z c y x', c=C).contiguous()
+        logits_3d = rearrange(logits_2d, 'b z c y x -> b c z y x').contiguous()
         L_ce = self.ce_loss(logits_3d, target)
 
-        probas_2d = F.softmax(logits, dim=1)
+        logits_2d = rearrange(logits_2d, 'b z c y x -> (b z) c y x')
+        target_2d = rearrange(target, 'b z y x -> (b z) y x')
+
+        probas_2d = F.softmax(logits_2d, dim=1)
 
         L_lovasz = lovasz_softmax(
             probas_2d,
-            target,
+            target_2d,
             classes='present',
             per_image=False,
             ignore=self.ignore_index

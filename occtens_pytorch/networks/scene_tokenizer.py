@@ -104,7 +104,7 @@ class MultiScaleVQVAE(nn.Module):
     def encode(self, x, return_token_only=False):
         stats = {}
 
-        f, skips = self.encoder(x)  # (B, D, H_lat, W_lat), latent space
+        f = self.encoder(x)  # (B, D, H_lat, W_lat), latent space
         B, D, H_lat, W_lat = f.shape
 
         z_q_list = []
@@ -132,9 +132,9 @@ class MultiScaleVQVAE(nn.Module):
         if return_token_only:
             return torch.cat(z_q_list, dim=2)
         #return f, z_q_list, indices_list, vq_loss_sum, stats, skips
-        return f, indices_list, stats, skips
+        return f, indices_list, stats
 
-    def decode(self, f, indices_list, skips):
+    def decode(self, f, indices_list):
         B, D, H_lat, W_lat = f.shape
 
         for idx, idx_s in enumerate(indices_list):
@@ -142,7 +142,7 @@ class MultiScaleVQVAE(nn.Module):
             z = F.interpolate(z, size=(H_lat, W_lat), mode="nearest").contiguous()
             f = f + self.phi_dec[idx](z)
 
-        return self.decoder(f, skips)
+        return self.decoder(f)
 
     def forward(self, x):
         B, Z, Y, X = x.size()
@@ -154,9 +154,9 @@ class MultiScaleVQVAE(nn.Module):
 
         x_one_hot = F.one_hot(x_clamped, num_classes=18)
         x_one_hot = x_one_hot * valid.unsqueeze(-1)
-        x = rearrange(x_one_hot, 'b z y x c ->  (b c) z y x').float()
-        F_latent, indices_list, stats, skips = self.encode(x)
-        x_hat = self.decode(F_latent, indices_list, skips)
+        x = rearrange(x_one_hot, 'b z y x c ->  b (z c) y x').float()
+        F_latent, indices_list, stats = self.encode(x)
+        x_hat = self.decode(F_latent, indices_list)
 
         stats['x'] = rearrange(x_one_hot, 'b z y x c -> b c z y x')
         stats['y'] = y
@@ -175,7 +175,7 @@ class Encoder(nn.Module):
         super().__init__()
         self.comp = nn.Sequential(
             nn.Conv2d(in_channels, hidden_channels // 2, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(hidden_channels // 2),
+            nn.GroupNorm(num_groups=8, num_channels=hidden_channels // 2),
             nn.ReLU(inplace=True)
         )
         self.conv1 = nn.Sequential(
@@ -199,9 +199,7 @@ class Encoder(nn.Module):
         x3 = self.conv3(x2)
         f  = self.to_latent(x3)
 
-        skips = {"s0": x0, "s1": x1, "s2": x2}
-
-        return f, skips
+        return f
     
 class Decoder(nn.Module):
     def __init__(
@@ -222,29 +220,19 @@ class Decoder(nn.Module):
         self.up2 = nn.ConvTranspose2d(hidden_channels, hidden_channels, kernel_size=kernel_size[2], stride=2, padding=1)
         self.up3 = nn.ConvTranspose2d(hidden_channels, hidden_channels // 2, kernel_size=kernel_size[3], stride=2, padding=1)
 
-        self.proj_s2 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1)
-        self.proj_s1 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1)
-        self.proj_s0 = nn.Conv2d(hidden_channels // 2, hidden_channels // 2, kernel_size=1)
-
         self.act = nn.ReLU(inplace=True)
         self.decomp = nn.Conv2d(hidden_channels // 2, in_channels, kernel_size=1)
 
-    def forward(self, f, skips=None):
+    def forward(self, f):
         x = self.conv0(f)
 
         x = self.up1(x)
-        if skips is not None:
-            x = x + self.proj_s2(skips["s2"])
         x = self.act(x)
 
         x = self.up2(x)
-        if skips is not None:
-            x = x + self.proj_s1(skips["s1"])
         x = self.act(x)
 
         x = self.up3(x)
-        if skips is not None:
-            x = x + self.proj_s0(skips["s0"])
         x = self.act(x)
 
         return self.decomp(x)
