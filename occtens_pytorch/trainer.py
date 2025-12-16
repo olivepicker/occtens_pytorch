@@ -22,6 +22,8 @@ class SceneTokenizerTrainer(nn.Module):
         autocast_dtype=torch.float16,
         batch_size=4,
         num_workers=4,
+        num_classes=18,
+        free_class_index=17,
         lambda_ce=10.0,
         lambda_lovasz=1.0,
         lambda_geoscal=0.3,
@@ -63,7 +65,8 @@ class SceneTokenizerTrainer(nn.Module):
             lambda_lovasz=lambda_lovasz,
             lambda_semscal=lambda_semscal,
             ignore_index=ignore_index,
-            num_classes=18,
+            num_classes=num_classes,
+            free_class_index=free_class_index
         )
 
         self.lambda_rec = lambda_recon

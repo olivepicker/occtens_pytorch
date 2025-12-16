@@ -3,9 +3,9 @@
 Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Temporal Next-Scale Prediction](https://arxiv.org/abs/2509.03887) from Jin et al.
 
 ## TODO
-- [ ] **Scene Tokenizer**
-    - [ ] Implement VQ-VAE
-        - [ ] *Residual Block*
+- [x] **Scene Tokenizer**
+    - [x] Implement VQ-VAE
+        - [x] *Residual Block*
     - [ ] Multi-Scale Quantizer
         - [ ] *Develop Phi*
         - [ ] *Normalize* 
@@ -30,7 +30,7 @@ from trainer import SceneTokenizerTrainer
 ...
 
 m = MultiScaleVQVAE(
-    in_channels=288
+    in_channels=16
 )
 
 trainer = SceneTokenizerTrainer(

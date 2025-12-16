@@ -104,7 +104,7 @@ class MultiScaleVQVAE(nn.Module):
     def encode(self, x, return_token_only=False):
         stats = {}
 
-        f = self.encoder(x)  # (B, D, H_lat, W_lat), latent space
+        f, skips = self.encoder(x)  # (B, D, H_lat, W_lat), latent space
         B, D, H_lat, W_lat = f.shape
 
         z_q_list = []
@@ -124,25 +124,25 @@ class MultiScaleVQVAE(nn.Module):
             vq_loss_sum = vq_loss_sum + vq_loss_s
             
             z = self.vq.codebook(idx_s).permute(0,3,1,2)
-            z = F.interpolate(z, size=(H_lat, W_lat), mode="bicubic").contiguous()
+            z = F.interpolate(z, size=(H_lat, W_lat), mode="nearest").contiguous()
             f = f - self.phi_enc[idx](z)
 
             stats[f"perplexity_s{s}"] = perplex_s.detach()
 
         if return_token_only:
             return torch.cat(z_q_list, dim=2)
-        
-        return f, z_q_list, indices_list, vq_loss_sum, stats
+        #return f, z_q_list, indices_list, vq_loss_sum, stats, skips
+        return f, indices_list, stats, skips
 
-    def decode(self, f, indices_list):
+    def decode(self, f, indices_list, skips):
         B, D, H_lat, W_lat = f.shape
 
         for idx, idx_s in enumerate(indices_list):
             z = self.vq.codebook(idx_s).permute(0,3,1,2)
-            z = F.interpolate(z, size=(H_lat, W_lat), mode="bicubic").contiguous()
+            z = F.interpolate(z, size=(H_lat, W_lat), mode="nearest").contiguous()
             f = f + self.phi_dec[idx](z)
 
-        return self.decoder(f)
+        return self.decoder(f, skips)
 
     def forward(self, x):
         B, Z, Y, X = x.size()
@@ -154,18 +154,13 @@ class MultiScaleVQVAE(nn.Module):
 
         x_one_hot = F.one_hot(x_clamped, num_classes=18)
         x_one_hot = x_one_hot * valid.unsqueeze(-1)
-        x = rearrange(x_one_hot, 'b z y x c ->  b (z c) y x').float()
-        F_latent, z_q_list, indices_list, vq_loss_sum, stats = self.encode(x)
-        x_hat = self.decode(F_latent, indices_list)
-
-        #recon_loss = F.binary_cross_entropy_with_logits(logit, targets.float())
-        #total_loss = recon_loss + vq_loss_sum
+        x = rearrange(x_one_hot, 'b z y x c ->  (b c) z y x').float()
+        F_latent, indices_list, stats, skips = self.encode(x)
+        x_hat = self.decode(F_latent, indices_list, skips)
 
         stats['x'] = rearrange(x_one_hot, 'b z y x c -> b c z y x')
         stats['y'] = y
         stats['logits'] = x_hat
-        #stats["recon_loss"] = recon_loss.detach()
-        #stats["vq_loss"] = vq_loss_sum.detach()
 
         return stats
     
@@ -183,28 +178,30 @@ class Encoder(nn.Module):
             nn.BatchNorm2d(hidden_channels // 2),
             nn.ReLU(inplace=True)
         )
-        self.encoder = nn.Sequential(
-            nn.Conv2d(hidden_channels // 2, hidden_channels, 
-                      kernel_size=kernel_size[0], stride=2, padding=1),
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(hidden_channels // 2, hidden_channels, kernel_size=kernel_size[0], stride=2, padding=1),
             nn.ReLU(inplace=True),
-
-            nn.Conv2d(hidden_channels, hidden_channels, 
-                      kernel_size=kernel_size[1], stride=2, padding=1),
-            nn.ReLU(inplace=True),
-
-            nn.Conv2d(hidden_channels, hidden_channels, 
-                      kernel_size=kernel_size[2], stride=2, padding=1),
-            nn.ReLU(inplace=True),
-
-            nn.Conv2d(hidden_channels, latent_dim, 
-                      kernel_size=kernel_size[3], stride=1, padding=1),
         )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=kernel_size[1], stride=2, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=kernel_size[2], stride=2, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.to_latent = nn.Conv2d(hidden_channels, latent_dim, kernel_size=kernel_size[3], stride=1, padding=1)
 
     def forward(self, x):
-        x = self.comp(x)
-        x = self.encoder(x)
+        x0 = self.comp(x)
+        x1 = self.conv1(x0)
+        x2 = self.conv2(x1)
+        x3 = self.conv3(x2)
+        f  = self.to_latent(x3)
 
-        return x
+        skips = {"s0": x0, "s1": x1, "s2": x2}
+
+        return f, skips
     
 class Decoder(nn.Module):
     def __init__(
@@ -216,26 +213,38 @@ class Decoder(nn.Module):
     ):
         super().__init__()
 
-        self.decoder = nn.Sequential(
-            nn.Conv2d(latent_dim, hidden_channels, 
-                      kernel_size=kernel_size[0], stride=1, padding=1),
+        self.conv0 = nn.Sequential(
+            nn.Conv2d(latent_dim, hidden_channels, kernel_size=kernel_size[0], stride=1, padding=1),
             nn.ReLU(inplace=True),
-
-            nn.ConvTranspose2d(hidden_channels, hidden_channels,
-                               kernel_size=kernel_size[1], stride=2, padding=1),
-            nn.ReLU(inplace=True),
-
-            nn.ConvTranspose2d(hidden_channels, hidden_channels,
-                               kernel_size=kernel_size[2], stride=2, padding=1),
-            nn.ReLU(inplace=True),
-
-            nn.ConvTranspose2d(hidden_channels, hidden_channels  // 2, 
-                               kernel_size=kernel_size[3], stride=2, padding=1),
         )
+
+        self.up1 = nn.ConvTranspose2d(hidden_channels, hidden_channels, kernel_size=kernel_size[1], stride=2, padding=1)
+        self.up2 = nn.ConvTranspose2d(hidden_channels, hidden_channels, kernel_size=kernel_size[2], stride=2, padding=1)
+        self.up3 = nn.ConvTranspose2d(hidden_channels, hidden_channels // 2, kernel_size=kernel_size[3], stride=2, padding=1)
+
+        self.proj_s2 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1)
+        self.proj_s1 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1)
+        self.proj_s0 = nn.Conv2d(hidden_channels // 2, hidden_channels // 2, kernel_size=1)
+
+        self.act = nn.ReLU(inplace=True)
         self.decomp = nn.Conv2d(hidden_channels // 2, in_channels, kernel_size=1)
 
-    def forward(self, x):
-        x = self.decoder(x)
-        x = self.decomp(x)
+    def forward(self, f, skips=None):
+        x = self.conv0(f)
 
-        return x
+        x = self.up1(x)
+        if skips is not None:
+            x = x + self.proj_s2(skips["s2"])
+        x = self.act(x)
+
+        x = self.up2(x)
+        if skips is not None:
+            x = x + self.proj_s1(skips["s1"])
+        x = self.act(x)
+
+        x = self.up3(x)
+        if skips is not None:
+            x = x + self.proj_s0(skips["s0"])
+        x = self.act(x)
+
+        return self.decomp(x)

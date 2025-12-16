@@ -209,6 +209,7 @@ class CustomSceneLoss(nn.Module):
         lambda_geoscal: float = 0.3,
         lambda_semscal: float = 0.5,
         ignore_index: int = 255,
+        free_class_index: int = 17,
         ce_class_weights: torch.Tensor | None = None,
     ):
         super().__init__()
@@ -218,6 +219,7 @@ class CustomSceneLoss(nn.Module):
         self.lambda_geoscal = lambda_geoscal
         self.lambda_semscal = lambda_semscal
         self.ignore_index = ignore_index
+        self.free_class_index = free_class_index
 
         self.ce_loss = nn.CrossEntropyLoss(
             weight=ce_class_weights,
@@ -228,19 +230,15 @@ class CustomSceneLoss(nn.Module):
         B, Cz, Y, X = logits.shape
         C = self.num_classes
         Z = Cz // C
-        assert Cz == C * Z, f"Channel dim {Cz} != num_classes({C}) * num_z({Z})"
+        #assert Cz == C * Z, f"Channel dim {Cz} != num_classes({C}) * num_z({Z})"
 
-        logits_2d = rearrange(logits, 'b (z c) y x -> b z c y x', c=C).contiguous()
-        logits_3d = rearrange(logits_2d, 'b z c y x -> b c z y x').contiguous()
+        logits_3d = rearrange(logits, 'b z c y x -> b c z y x').contiguous()
         L_ce = self.ce_loss(logits_3d, target)
 
-        logits_2d = rearrange(logits_2d, 'b z c y x -> (b z) c y x')
-        target_2d = rearrange(target, 'b z y x -> (b z) y x')
-
-        probas_2d = F.softmax(logits_2d, dim=1)
+        probas_2d = F.softmax(logits, dim=1)
         L_lovasz = lovasz_softmax(
             probas_2d,
-            target_2d,
+            target,
             classes='present',
             per_image=False,
             ignore=self.ignore_index
@@ -249,6 +247,7 @@ class CustomSceneLoss(nn.Module):
         L_geoscal = geo_scal_loss(
             logits_3d,
             target,
+            free_class=self.free_class_index,
             ignore_index=self.ignore_index
         )
 
