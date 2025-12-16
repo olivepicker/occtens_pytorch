@@ -232,10 +232,11 @@ class CustomSceneLoss(nn.Module):
         Z = Cz // C
         #assert Cz == C * Z, f"Channel dim {Cz} != num_classes({C}) * num_z({Z})"
 
-        logits_3d = rearrange(logits, 'b z c y x -> b c z y x').contiguous()
+        logits_3d = rearrange(logits, '(b c) z y x -> b c z y x', c=C).contiguous()
         L_ce = self.ce_loss(logits_3d, target)
 
         probas_2d = F.softmax(logits, dim=1)
+
         L_lovasz = lovasz_softmax(
             probas_2d,
             target,
