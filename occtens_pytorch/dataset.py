@@ -22,12 +22,11 @@ class SceneDataset(Dataset):
         
         sem, mask_lidar, mask_camera = map(lambda t: rearrange(t, 'x y z -> z y x'), (sem, mask_lidar, mask_camera))
         valid_mask = (mask_lidar > 0) | (mask_camera > 0)
-        sem[~valid_mask] = 18
-        
+        # sem[~valid_mask] = 18
+
         out = {
-            'semantic': torch.tensor(sem).long(),
-            'mask_lidar': torch.tensor(mask_lidar).long(),
-            'mask_camera': torch.tensor(mask_camera).long()
+            'semantic': torch.tensor(sem).float(),
+            'mask': torch.tensor(valid_mask).long(),
         }
 
         return out

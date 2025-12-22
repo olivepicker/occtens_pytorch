@@ -119,7 +119,8 @@ def mean(l, ignore_nan=False, empty=0):
         return acc
     return acc / n
 
-def geo_scal_loss(pred, ssc_target, ignore_index=0, free_class=17, eps=1e-5):
+
+def geo_scal_loss(pred, ssc_target, ignore_index=255, free_class=17, eps=1e-5):
     pred = F.softmax(pred, dim=1)
     
     empty_probs = pred[:, free_class, :, :, :] # free class
@@ -149,56 +150,51 @@ def geo_scal_loss(pred, ssc_target, ignore_index=0, free_class=17, eps=1e-5):
 
     return loss_precision + loss_recall + loss_spec
 
-def sem_scal_loss(pred, ssc_target, ignore_index=0, n_classes=18, eps=1e-5):
+def sem_scal_loss(pred, ssc_target):
+    # Get softmax probabilities
     pred = F.softmax(pred, dim=1)
-    mask = ssc_target != ignore_index
-    
-    p_masked = pred.permute(0, 2, 3, 4, 1)[mask] # (N_valid, C)
-    target_masked = ssc_target[mask]             # (N_valid,)
+    loss = 0
+    count = 0
+    mask = ssc_target != 255
+    n_classes = pred.shape[1]
+    for i in range(0, n_classes):
 
-    loss = 0.0
-    count = 0.0
+        # Get probability of class i
+        p = pred[:, i, :, :, :]
 
-    for i in range(n_classes):
+        # Remove unknown voxels
+        target_ori = ssc_target
+        p = p[mask]
+        target = ssc_target[mask]
 
-        p_i = p_masked[:, i]
-        target_i = (target_masked == i).float()
-        
-        sum_target = torch.sum(target_i)
-        sum_p = torch.sum(p_i)
-        
-        if sum_target < eps and sum_p < eps:
-            continue
-            
-        intersection = torch.sum(p_i * target_i)
-        
-        loss_class = 0.0
-        
-        if sum_p > eps:
-            precision = intersection / (sum_p + eps)
-            precision = torch.clamp(precision, min=eps, max=1.0)
-            loss_class += -torch.log(precision)
-
-        if sum_target > eps:
-            recall = intersection / (sum_target + eps)
-            recall = torch.clamp(recall, min=eps, max=1.0)
-            loss_class += -torch.log(recall)
-
-        inverse_target = 1.0 - target_i
-        sum_inverse_target = torch.sum(inverse_target)
-        
-        if sum_inverse_target > eps:
-            specificity = torch.sum((1.0 - p_i) * inverse_target) / (sum_inverse_target + eps)
-            specificity = torch.clamp(specificity, min=eps, max=1.0)
-            loss_class += -torch.log(specificity)
-
-        loss += loss_class
-        count += 1.0
-
-    if count > 0:
-        return loss / count
-    else:
-        return torch.tensor(0.0, device=pred.device, requires_grad=True)
+        completion_target = torch.ones_like(target)
+        completion_target[target != i] = 0
+        completion_target_ori = torch.ones_like(target_ori).float()
+        completion_target_ori[target_ori != i] = 0
+        if torch.sum(completion_target) > 0:
+            count += 1.0
+            nominator = torch.sum(p * completion_target)
+            loss_class = 0
+            if torch.sum(p) > 0:
+                precision = nominator / (torch.sum(p))
+                loss_precision = F.binary_cross_entropy(
+                    precision, torch.ones_like(precision)
+                )
+                loss_class += loss_precision
+            if torch.sum(completion_target) > 0:
+                recall = nominator / (torch.sum(completion_target))
+                loss_recall = F.binary_cross_entropy(recall, torch.ones_like(recall))
+                loss_class += loss_recall
+            if torch.sum(1 - completion_target) > 0:
+                specificity = torch.sum((1 - p) * (1 - completion_target)) / (
+                    torch.sum(1 - completion_target)
+                )
+                loss_specificity = F.binary_cross_entropy(
+                    specificity, torch.ones_like(specificity)
+                )
+                loss_class += loss_specificity
+            loss += loss_class
+    return loss / count
 
 class CustomSceneLoss(nn.Module):
     def __init__(
@@ -227,11 +223,12 @@ class CustomSceneLoss(nn.Module):
         )
 
     def forward(self, logits, target):
-        B, Cz, Y, X = logits.shape
+        B = target.size(0)
+        _, Cz, Y, X = logits.shape
         C = self.num_classes
         Z = Cz // C
         #assert Cz == C * Z, f"Channel dim {Cz} != num_classes({C}) * num_z({Z})"
-        logits_2d = rearrange(logits, 'b (z c) y x -> b z c y x', c=C).contiguous()
+        logits_2d = rearrange(logits, 'b (z c) y x -> b z c y x', z=Z).contiguous()
         logits_3d = rearrange(logits_2d, 'b z c y x -> b c z y x').contiguous()
         L_ce = self.ce_loss(logits_3d, target)
 
@@ -251,15 +248,15 @@ class CustomSceneLoss(nn.Module):
         L_geoscal = geo_scal_loss(
             logits_3d,
             target,
-            free_class=self.free_class_index,
-            ignore_index=self.ignore_index
+            #free_class=self.free_class_index,
+            #ignore_index=self.ignore_index
         )
 
         L_semscal = sem_scal_loss(
             logits_3d,
             target,
-            ignore_index=self.ignore_index,
-            n_classes = self.num_classes
+            #ignore_index=self.ignore_index,
+            #n_classes = self.num_classes
         )
 
         loss = (

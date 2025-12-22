@@ -87,9 +87,10 @@ class SceneTokenizerTrainer(nn.Module):
         self.model.train()
         self.optimizer.zero_grad()
         x = batch["semantic"].to(self.device)
+        mask = batch["mask"].to(self.device)
 
         with torch.autocast(**self.autocast_config):
-            out = self.model(x)
+            out = self.model(x, mask)
             logits = out["logits"]
             
             loss_dict = self.criterion(logits, out['y'])
@@ -107,9 +108,10 @@ class SceneTokenizerTrainer(nn.Module):
         self.model.eval()
         with torch.no_grad():
             x = batch["semantic"].to(self.device)
+            mask = batch["mask"].to(self.device)
 
             with torch.autocast(**self.autocast_config):
-                out = self.model(x)
+                out = self.model(x, mask)
                 logits = out["logits"]
                 
                 loss_dict = self.criterion(logits, out['y'])
