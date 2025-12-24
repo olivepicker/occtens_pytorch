@@ -153,7 +153,7 @@ class MultiScaleVQVAE(nn.Module):
         x_one_hot = F.one_hot(x, num_classes=18)
         #x_one_hot = F.one_hot(x_clamped, num_classes=18)
         #x_one_hot = x_one_hot * valid.unsqueeze(-1)
-        x = rearrange(x_one_hot, 'b z y x c ->  b (z c) y x').float()
+        x = rearrange(x_one_hot, 'b z y x c ->  (b c) z y x').float()
         F_latent, indices_list, stats = self.encode(x)
         x_hat = self.decode(F_latent, indices_list)
 
@@ -173,12 +173,12 @@ class Encoder(nn.Module):
     ):
         super().__init__()
         self.comp = nn.Sequential(
-            nn.Conv2d(in_channels, hidden_channels // 2, kernel_size=1, bias=False),
-            nn.GroupNorm(num_groups=8, num_channels=hidden_channels // 2),
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(num_groups=8, num_channels=hidden_channels),
             nn.ReLU(inplace=True)
         )
         self.conv1 = nn.Sequential(
-            nn.Conv2d(hidden_channels // 2, hidden_channels, kernel_size=kernel_size[0], stride=2, padding=1),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=kernel_size[0], stride=2, padding=1),
             nn.ReLU(inplace=True),
         )
         self.conv2 = nn.Sequential(
@@ -239,20 +239,20 @@ class Decoder(nn.Module):
 
         self.up3 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='nearest'),
-            nn.Conv2d(hidden_channels, hidden_channels // 2, kernel_size=3, padding=1),
-            ResBlock(hidden_channels // 2),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            ResBlock(hidden_channels),
         )
 
         self.refinement = nn.Sequential(
-            nn.Conv2d(hidden_channels // 2, hidden_channels // 2, kernel_size=3, padding=1),
-            nn.GroupNorm(8, hidden_channels // 2),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(8, hidden_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_channels // 2, hidden_channels // 2, kernel_size=3, padding=1),
-            nn.GroupNorm(8, hidden_channels // 2),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(8, hidden_channels),
             nn.ReLU(inplace=True),
         )
 
-        self.decomp = nn.Conv2d(hidden_channels // 2, in_channels, kernel_size=1)
+        self.decomp = nn.Conv2d(hidden_channels, in_channels, kernel_size=1)
 
     def forward(self, f):
         x = self.conv0(f)
@@ -263,39 +263,3 @@ class Decoder(nn.Module):
         x = self.refinement(x)
         
         return self.decomp(x)
-    
-# class Decoder(nn.Module):
-#     def __init__(
-#         self, 
-#         in_channels: int, 
-#         hidden_channels: int,
-#         latent_dim: int,
-#         kernel_size = [4,4,3,4]
-#     ):
-#         super().__init__()
-
-#         self.conv0 = nn.Sequential(
-#             nn.Conv2d(latent_dim, hidden_channels, kernel_size=kernel_size[0], stride=1, padding=1),
-#             nn.ReLU(inplace=True),
-#         )
-
-#         self.up1 = nn.ConvTranspose2d(hidden_channels, hidden_channels, kernel_size=kernel_size[1], stride=2, padding=1)
-#         self.up2 = nn.ConvTranspose2d(hidden_channels, hidden_channels, kernel_size=kernel_size[2], stride=2, padding=1)
-#         self.up3 = nn.ConvTranspose2d(hidden_channels, hidden_channels // 2, kernel_size=kernel_size[3], stride=2, padding=1)
-
-#         self.act = nn.ReLU(inplace=True)
-#         self.decomp = nn.Conv2d(hidden_channels // 2, in_channels, kernel_size=1)
-
-#     def forward(self, f):
-#         x = self.conv0(f)
-
-#         x = self.up1(x)
-#         x = self.act(x)
-
-#         x = self.up2(x)
-#         x = self.act(x)
-
-#         x = self.up3(x)
-#         x = self.act(x)
-
-#         return self.decomp(x)

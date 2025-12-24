@@ -228,7 +228,7 @@ class CustomSceneLoss(nn.Module):
         C = self.num_classes
         Z = Cz // C
         #assert Cz == C * Z, f"Channel dim {Cz} != num_classes({C}) * num_z({Z})"
-        logits_2d = rearrange(logits, 'b (z c) y x -> b z c y x', z=Z).contiguous()
+        logits_2d = rearrange(logits, '(b c) z y x -> b z c y x', b=B).contiguous()
         logits_3d = rearrange(logits_2d, 'b z c y x -> b c z y x').contiguous()
         L_ce = self.ce_loss(logits_3d, target)
 
