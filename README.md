@@ -6,7 +6,7 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
 - [x] **Scene Tokenizer**
     - [x] Implement VQ-VAE
         - [x] *Residual Block*
-    - [ ] Multi-Scale Quantizer
+    - [x] Multi-Scale Quantizer
         - [ ] *Develop Phi*
         - [ ] *Normalize* 
 - [x] **Motion Tokenizer**
@@ -38,7 +38,7 @@ trainer = SceneTokenizerTrainer(
     optimizer = torch.optim.AdamW(lr=1e-4,params=m.parameters()),
     train_ds = train_ds,
     valid_ds = valid_ds,
-    batch_size = 32,
+    batch_size = 4,
     device = 'cuda',
 )
 
