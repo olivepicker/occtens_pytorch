@@ -2,9 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import os
+import numpy as np
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from einops import rearrange
+from tqdm.auto import tqdm
 
 from loss import CustomSceneLoss
 
@@ -31,7 +33,8 @@ class SceneTokenizerTrainer(nn.Module):
         ignore_index=255,
         lambda_recon=1.0, 
         lambda_vq=1.0,
-        save_path = 'scene_output/'
+        save_path = 'scene_output/',
+        save_token_maps = False
     ):
         super().__init__()
 
@@ -58,6 +61,18 @@ class SceneTokenizerTrainer(nn.Module):
             pin_memory=True,
             drop_last=False,
         )
+
+        self.save_token_maps = save_token_maps
+        if self.save_token_maps:
+            infer_ds = ConcatDataset([train_ds, valid_ds])
+            self.infer_dl = DataLoader(
+                infer_ds,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=True,
+                drop_last=False,
+            )         
 
         self.criterion = CustomSceneLoss(
             lambda_ce=lambda_ce,
@@ -155,6 +170,28 @@ class SceneTokenizerTrainer(nn.Module):
                 
                 last_path = os.path.join(self.save_path, "last_model.pth")
                 torch.save(self.model.state_dict(), last_path)
+
+    def save_token(self):
+        self.model.eval()
+        token_save_path = f'{self.save_path}/tokens/'
+        if os.path.exists(token_save_path):
+            os.makedirs(token_save_path)
+
+        for idx, batch in tqdm(enumerate(self.valid_dl), total=len(self.valid_dl)):
+            batch['semantic'] = batch['semantic'].to('cuda:2')
+            batch['mask'] = batch['mask'].to('cuda:2')
+            B = batch['semantic'].size(0)
+
+            with torch.no_grad():
+                _, tokens, _ = self.model.encode(batch['semantic'])
+                tokens = [rearrange(i, 'b x y -> b (x y)') for i in tokens]
+                tokens = torch.cat(tokens, dim=1).detach().cpu().numpy()
+
+                for b in range(B):
+                    scene_num = batch['scene_num'][b]
+                    scene_id = batch['scene_id'][b]
+                    np.save(os.path.join(token_save_path, f'{scene_num}_{scene_id}.npy'), tokens[b])
+                     
 
 class OccTENSTrainer(nn.Module):
     def __init__(
