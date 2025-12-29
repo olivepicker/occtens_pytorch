@@ -16,7 +16,7 @@ class MotionTokenizer:
         self.t_q = UniformMotionQuantizer(t_range[0], t_range[1], self.n_t)
 
     def __call__(self, xyt):
-        x, y, t = xyt[:,0,:], xyt[:,1,:], xyt[:,2,:]
+        x, y, t = xyt[:,:,0], xyt[:,:,1], xyt[:,:,2]
         token = self.cartesian_product(x, y, t)
 
         return token

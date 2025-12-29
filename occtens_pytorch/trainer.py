@@ -178,8 +178,8 @@ class SceneTokenizerTrainer(nn.Module):
             os.makedirs(token_save_path)
 
         for idx, batch in tqdm(enumerate(self.valid_dl), total=len(self.valid_dl)):
-            batch['semantic'] = batch['semantic'].to('cuda:2')
-            batch['mask'] = batch['mask'].to('cuda:2')
+            batch['semantic'] = batch['semantic'].to(self.device)
+            batch['mask'] = batch['mask'].to(self.device)
             B = batch['semantic'].size(0)
 
             with torch.no_grad():
@@ -197,6 +197,15 @@ class OccTENSTrainer(nn.Module):
     def __init__(
         self, 
         model,
+        optimizer,
+        train_ds,
+        valid_ds,
+        device='cuda',
+        autocast_enabled=False,
+        autocast_device_type='cuda',
+        autocast_dtype=torch.float16,
+        batch_size=4,
+        num_workers=4,
         context_frame_point=4,
         ignore_index=-1,
         do_valid=True,
@@ -208,16 +217,48 @@ class OccTENSTrainer(nn.Module):
             model, 
             context_frame_point=context_frame_point,
             ignore_index=ignore_index
+        ).to(device)
+
+        self.optimizer = optimizer
+        self.device = device
+
+        self.train_ds = train_ds
+        self.valid_ds = valid_ds
+
+        self.train_dl = DataLoader(
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=True,
         )
+        self.valid_dl = DataLoader(
+            valid_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=False,
+        )
+
         self.beta_scene = beta_scene
         self.beta_motion = beta_motion
 
-    def train_one_step(self):
+    def train_one_step(self, batch):
         self.model.train()
-        batch = None
-        out = self.model(scene=batch['scene'], motion=batch['motion'])
-        loss = out['scene_loss'] * self.beta_scene + out['motion_loss'] * self.beta_motion
+        self.optimizer.zero_grad()
+
+        with torch.autocast(**self.autocast_config):
+            out = self.model(scene_ids=batch['scene_token'], motions=batch['motion'])
+            loss = out['scene_loss'] * self.beta_scene + out['motion_loss'] * self.beta_motion
+
         loss.backward()
+        self.optimizer.step()
+
+        return {
+            "loss_total": loss.detach(),
+        }
 
     def valid_one_step(self):
         self.model.eval()
@@ -239,8 +280,8 @@ class AutoRegressiveWrapper(nn.Module):
         self.lm_head = nn.Linear(self.dim, self.vocab_size)
         self.context_point = context_frame_point
 
-    def forward(self, scene, motion):
-        out = self.model(scene=scene, motion=motion)
+    def forward(self, scene_token_ids, motions):
+        out = self.model(scene_token_ids=scene_token_ids, motions=motions)
         x = out['full_embedding'][:,:-1,:]
 
         token_ids, frame_idx, token_type = \

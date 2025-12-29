@@ -45,10 +45,14 @@ class OccTENS(nn.Module):
                 scales = scene_scales,
                 enc_kernel_size = scene_enc_kernel_size
             )
+            self.scene_tokenizer.eval()
 
         if scene_weight_path is not None:
             w = torch.load(scene_weight_path) #FIXME
             self.scene_tokenizer.load_state_dict(w, strict=True)
+
+            for p in self.scene_tokenizer.parameters():
+                p.requires_grad_(False)
 
         self.motion_tokenizer = MotionTokenizer(
             x_range = motion_x_range,
@@ -65,18 +69,14 @@ class OccTENS(nn.Module):
             ff_mult = ff_mult
         )
 
-        self.scene_tokenizer.eval()
-        for p in self.scene_tokenizer.parameters():
-            p.requires_grad_(False)
-
         self.dim = dim
         self.motion_vocab_size = np.prod(motion_xyt_n_bins)
         self.vocab_size = scene_num_codes + self.motion_vocab_size
         self.scene_token_embedding = nn.Embedding(self.vocab_size, dim)
         self.motion_token_embedding = nn.Embedding(self.vocab_size, dim)
         
-    def forward(self, scene_ids, motions):
-        device = scene_ids.device
+    def forward(self, scene_token_ids, motions):
+        device = scene_token_ids.device
         
         #TODO without pre-generated token maps
         # B, F, C, H, W = scene.size()
@@ -89,21 +89,22 @@ class OccTENS(nn.Module):
         # scene_tokens = self.token_embedding(scene_ids)
 
         
-        B, F, T = scene_ids.size()
-        scene_tokens = self.scene_token_embedding(scene_ids)
-        motion_ids = self.motion_tokenizer(motions)
-        motion_tokens = self.motion_token_embedding(motion_ids)
+        B, F, T = scene_token_ids.size()
+        scene_tokens = self.scene_token_embedding(scene_token_ids)
+        motion_ids = self.motion_tokenizer(motions)[:,:,None]
+        motion_tokens = self.motion_token_embedding(motion_ids)#[:,:,None,:]
 
-        scene_lengths = torch.tensor(
-            scene_ids.shape[2],
+        scene_length = torch.tensor(
+            [scene_token_ids.shape[2]],
             device=device,
             dtype=torch.long
         )
 
-        motion_length = motion_ids.shape[2]
+        motion_length = motion_tokens.shape[2]
+
         lengths = torch.cat([
             torch.tensor([motion_length], device=device, dtype=torch.long),
-            scene_lengths
+            scene_length
         ], dim=0) 
 
         embedding = self.model(
@@ -112,7 +113,7 @@ class OccTENS(nn.Module):
             lengths = lengths
         ) # (batch, n_frame, token, dim)
 
-        token_emb = embedding[:,:,1:,:]
+        token_emb = embedding[:, 1:, :]
         token_length = int(lengths.sum().item())
         token_type = torch.zeros((B, F, token_length), device=device, dtype=torch.long)
         token_type[:, :, motion_length:] = 1
@@ -120,8 +121,8 @@ class OccTENS(nn.Module):
         out = {
             'full_embedding': embedding,
             'token_embedding': token_emb,
-            'token_ids': torch.cat([motion_ids, scene_ids], dim=2),
-            'scene_ids': scene_ids,
+            'token_ids': torch.cat([motion_ids, scene_token_ids], dim=2),
+            'scene_ids': scene_token_ids,
             'motion_ids':motion_ids,
             'token_type':token_type,
             'frame_idx': torch.arange(F, device=device).view(1, F, 1).expand(B, F, token_length),
