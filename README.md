@@ -13,13 +13,14 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
 - [ ] **World Model**
     - [x] Implement TENSFormer
         - [x] *Attention Mask - Temporal, Spatial*
-    - [ ] Temporal Scene-by-scene Prediction
-    - [ ] Spatial Scale-by-scale Generation
+    - [x] Temporal Scene-by-scene Prediction
+    - [x] Spatial Scale-by-scale Generation
     - [ ] Multi-modal Camera Pose Aggregation
-    - [ ] Auto-Regressive Wrapper
+    - [x] Auto-Regressive Wrapper
 - [ ] **Train / Inference Pipeline**
     - [x] Implement Losses
     - [ ] Train base model
+    - [ ] Generate
 
 ## Usage
 ```python
@@ -27,14 +28,15 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
 
 from networks.scene_tokenizer import MultiScaleVQVAE
 from trainer import SceneTokenizerTrainer
+from dataset import SceneDataset
 ...
 
 m = MultiScaleVQVAE(
-    in_channels=16
+    in_channels = 16
 )
 
 trainer = SceneTokenizerTrainer(
-    model=m,
+    model = m,
     optimizer = torch.optim.AdamW(lr=1e-4,params=m.parameters()),
     train_ds = train_ds,
     valid_ds = valid_ds,
@@ -43,6 +45,50 @@ trainer = SceneTokenizerTrainer(
 )
 
 trainer.train(num_epochs=200)
+
+# Save token maps
+...
+
+trainer = SceneTokenizerTrainer(    
+    model = m,          # Load the best weights before run!
+    optimizer = None,
+    train_ds = train_ds, 
+    valid_ds = valid_ds,
+    batch_size = 4,
+    device = 'cuda',
+    save_token = True   # If True, valid_ds will be concatenated with train_ds to tokenize the entire dataset.
+)
+
+trainer.save_token()
+```
+
+```python
+# Train OccTENS (Using Occ3D Nuscenes Dataset)
+
+from occtens_pytorch import OccTENS
+from trainer import OccTENSTrainer
+from dataset import OccTENSDataset
+
+...
+train_ds = OccTENSDataset(df = train_df, ann_path = 'data/annotations.json', num_frames = 6) 
+valid_ds = OccTENSDataset(df = valid_df, ann_path = 'data/annotations.json', num_frames = 6)
+
+m = OccTENS(
+    dim = 128
+)
+
+trainer = OccTENSTrainer(       # AutoRegressive Training
+    m,
+    optimizer = torch.optim.AdamW(lr=1e-4, params=m.parameters()),
+    train_ds = train_ds,
+    valid_ds = valid_ds,
+    batch_size = 2,
+    device = 'cuda',
+    autocast_enabled = True,    # Autocast not been tested!
+    context_frame_point = 3
+)
+
+trainer.train(num_epochs=50)
 ```
 
 ## Citations

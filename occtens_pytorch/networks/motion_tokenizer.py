@@ -4,8 +4,8 @@ import numpy as np
 class MotionTokenizer:
     def __init__(
         self, 
-        x_range = (-10, 10),
-        y_range = (-10, 10),
+        x_range = (-1, 1),
+        y_range = (-1, 1),
         t_range = (-np.pi, np.pi),
         xyt_n_bins = (20, 20, 20)
     ):

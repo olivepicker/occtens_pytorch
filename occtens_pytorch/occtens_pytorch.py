@@ -25,8 +25,8 @@ class OccTENS(nn.Module):
         scene_num_codes = 4096,
         scene_scales = (1, 5, 10, 15, 20, 25),
         scene_enc_kernel_size = (4, 4, 4, 3),
-        motion_x_range = (-10, 10),
-        motion_y_range = (-10, 10),
+        motion_x_range = (-1, 1),
+        motion_y_range = (-1, 1),
         motion_t_range = (-np.pi, np.pi),
         motion_xyt_n_bins = (20, 20, 20)
     ):
@@ -44,8 +44,7 @@ class OccTENS(nn.Module):
                 num_codes = scene_num_codes,
                 scales = scene_scales,
                 enc_kernel_size = scene_enc_kernel_size
-            )
-            self.scene_tokenizer.eval()
+            ).eval()
 
         if scene_weight_path is not None:
             w = torch.load(scene_weight_path) #FIXME
@@ -94,6 +93,7 @@ class OccTENS(nn.Module):
         motion_ids = self.motion_tokenizer(motions)[:,:,None]
         motion_tokens = self.motion_token_embedding(motion_ids)#[:,:,None,:]
 
+
         scene_length = torch.tensor(
             [scene_token_ids.shape[2]],
             device=device,
@@ -129,3 +129,59 @@ class OccTENS(nn.Module):
         }
 
         return out
+    
+
+class AutoRegressiveWrapper(nn.Module):
+    def __init__(
+        self,
+        model,
+        context_frame_point=4,
+        ignore_index=-1,
+    ):
+        super().__init__()
+        self.model = model
+        self.dim = self.model.dim
+        self.vocab_size = self.model.vocab_size
+        self.ignore_index = ignore_index
+
+        self.lm_head = nn.Linear(self.dim, self.vocab_size)
+        self.context_point = context_frame_point
+
+    def forward(self, scene_token_ids, motions):
+        out = self.model(scene_token_ids=scene_token_ids, motions=motions)
+        x = out['full_embedding'][:,:-1,:]
+
+        token_ids, frame_idx, token_type = \
+            map(lambda t:rearrange(t, 'b f t -> b (f t)'), (out['token_ids'], out['frame_idx'], out['token_type']))
+
+        assert torch.max(frame_idx) >= self.context_point, 'context_point must be lower than num frames.'
+        
+        is_future = frame_idx >= self.context_point
+        is_motion = token_type == 0
+        is_scene  = token_type == 1
+
+        scene_mask = is_future & is_scene
+        motion_mask = is_future & is_motion
+
+        logits = self.lm_head(x)
+
+        losses = F.cross_entropy(
+            input = rearrange(logits, 'b t d -> (b t) d'),
+            target = rearrange(token_ids, 'b ft -> (b ft)'),
+            reduction = 'none',
+            ignore_index = self.ignore_index
+        )
+
+        scene_loss = losses[rearrange(scene_mask, 'b d -> (b d)')].mean()
+        motion_loss = losses[rearrange(motion_mask, 'b d -> (b d)')].mean()
+
+        out = {
+            'losses': losses,
+            'scene_loss': scene_loss,
+            'motion_loss': motion_loss
+        }
+
+        return out
+
+    def generate(self, batch):
+        pass

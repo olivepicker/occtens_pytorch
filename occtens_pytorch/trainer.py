@@ -9,6 +9,7 @@ from einops import rearrange
 from tqdm.auto import tqdm
 
 from loss import CustomSceneLoss
+from occtens_pytorch import AutoRegressiveWrapper
 
 
 class SceneTokenizerTrainer(nn.Module):
@@ -34,7 +35,7 @@ class SceneTokenizerTrainer(nn.Module):
         lambda_recon=1.0, 
         lambda_vq=1.0,
         save_path = 'scene_output/',
-        save_token_maps = False
+        save_token = False
     ):
         super().__init__()
 
@@ -45,6 +46,9 @@ class SceneTokenizerTrainer(nn.Module):
         self.train_ds = train_ds
         self.valid_ds = valid_ds
 
+        if save_token:
+            self.valid_ds = ConcatDataset([train_ds, valid_ds])
+
         self.train_dl = DataLoader(
             train_ds,
             batch_size=batch_size,
@@ -53,6 +57,7 @@ class SceneTokenizerTrainer(nn.Module):
             pin_memory=True,
             drop_last=True,
         )
+        
         self.valid_dl = DataLoader(
             valid_ds,
             batch_size=batch_size,
@@ -61,18 +66,6 @@ class SceneTokenizerTrainer(nn.Module):
             pin_memory=True,
             drop_last=False,
         )
-
-        self.save_token_maps = save_token_maps
-        if self.save_token_maps:
-            infer_ds = ConcatDataset([train_ds, valid_ds])
-            self.infer_dl = DataLoader(
-                infer_ds,
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=num_workers,
-                pin_memory=True,
-                drop_last=False,
-            )         
 
         self.criterion = CustomSceneLoss(
             lambda_ce=lambda_ce,
@@ -135,7 +128,7 @@ class SceneTokenizerTrainer(nn.Module):
             total_loss = rec_loss
 
         return {
-            "loss_total": total_loss,
+            "loss_total": total_loss.detach(),
         }
     
     def train(self, num_epochs, log_interval=50, val_interval=1):
@@ -208,9 +201,9 @@ class OccTENSTrainer(nn.Module):
         num_workers=4,
         context_frame_point=4,
         ignore_index=-1,
-        do_valid=True,
-        beta_scene = 0.5,
-        beta_motion = 0.5
+        beta_scene = 1.,
+        beta_motion = 1.,
+        save_path = 'occtens_output/'
     ):
         super().__init__()
         self.model = AutoRegressiveWrapper(
@@ -233,6 +226,7 @@ class OccTENSTrainer(nn.Module):
             pin_memory=True,
             drop_last=True,
         )
+
         self.valid_dl = DataLoader(
             valid_ds,
             batch_size=batch_size,
@@ -242,15 +236,28 @@ class OccTENSTrainer(nn.Module):
             drop_last=False,
         )
 
+        self.autocast_config = {
+            'device_type':autocast_device_type,
+            'dtype':autocast_dtype,
+            'enabled':autocast_enabled
+        }
+
         self.beta_scene = beta_scene
         self.beta_motion = beta_motion
+        self.best_val_loss = float('inf')
+
+        self.save_path = save_path
+        if os.path.exists(self.save_path)==False:
+            os.makedirs(self.save_path)
 
     def train_one_step(self, batch):
         self.model.train()
         self.optimizer.zero_grad()
 
         with torch.autocast(**self.autocast_config):
-            out = self.model(scene_ids=batch['scene_token'], motions=batch['motion'])
+            scene_token_ids = batch['scene_token'].to(self.device)
+            motions = batch['motion'].to(self.device)
+            out = self.model(scene_token_ids=scene_token_ids, motions=motions)
             loss = out['scene_loss'] * self.beta_scene + out['motion_loss'] * self.beta_motion
 
         loss.backward()
@@ -260,61 +267,46 @@ class OccTENSTrainer(nn.Module):
             "loss_total": loss.detach(),
         }
 
-    def valid_one_step(self):
+    def valid_one_step(self, batch):
         self.model.eval()
-        pass
+        with torch.autocast(**self.autocast_config):
+            scene_token_ids = batch['scene_token'].to(self.device)
+            motions = batch['motion'].to(self.device)
+            out = self.model(scene_token_ids=scene_token_ids, motions=motions)
+            loss = out['scene_loss'] * self.beta_scene + out['motion_loss'] * self.beta_motion
 
-class AutoRegressiveWrapper(nn.Module):
-    def __init__(
-        self,
-        model,
-        context_frame_point=4,
-        ignore_index=-1,
-    ):
-        super().__init__()
-        self.model = model
-        self.dim = self.model.dim
-        self.vocab_size = self.model.vocab_size
-        self.ignore_index = ignore_index
-
-        self.lm_head = nn.Linear(self.dim, self.vocab_size)
-        self.context_point = context_frame_point
-
-    def forward(self, scene_token_ids, motions):
-        out = self.model(scene_token_ids=scene_token_ids, motions=motions)
-        x = out['full_embedding'][:,:-1,:]
-
-        token_ids, frame_idx, token_type = \
-            map(lambda t:rearrange(t, 'b f t -> b (f t)'), (out['token_ids'], out['frame_idx'], out['token_type']))
-
-        assert torch.max(frame_idx) >= self.context_point, 'context_point must be lower than num frames.'
-        
-        is_future = frame_idx >= self.context_point
-        is_motion = token_type == 0
-        is_scene  = token_type == 1
-
-        scene_mask = is_future & is_scene
-        motion_mask = is_future & is_motion
-
-        logits = self.lm_head(x)
-
-        losses = F.cross_entropy(
-            input = rearrange(logits, 'b t d -> (b t) d'),
-            target = rearrange(token_ids, 'b ft -> (b ft)'),
-            reduction = 'none',
-            ignore_index = self.ignore_index
-        )
-
-        scene_loss = losses[rearrange(scene_mask, 'b d -> (b d)')].mean()
-        motion_loss = losses[rearrange(motion_mask, 'b d -> (b d)')].mean()
-
-        out = {
-            'losses': losses,
-            'scene_loss': scene_loss,
-            'motion_loss': motion_loss
+        return {
+            "loss_total": loss.detach(),
         }
 
-        return out
+    def train(self, num_epochs, log_interval=50, val_interval=1):
+        for epoch in range(num_epochs):
+            train_loss_sum = 0.0
+            for step, batch in enumerate(self.train_dl):
+                log = self.train_one_step(batch)
+                train_loss_sum += log["loss_total"].item()
 
-    def generate(self, batch):
-        pass
+                if (step + 1) % log_interval == 0:
+                    avg = train_loss_sum / (step + 1)
+                    print(f"[Epoch {epoch+1} | Step {step+1}] "
+                          f"train_loss={avg:.4f}")
+
+            if (epoch + 1) % val_interval == 0:
+                self.model.eval()
+                val_loss_sum = 0.0
+                with torch.no_grad():
+                    for batch in self.valid_dl:
+                        log = self.valid_one_step(batch)
+                        val_loss_sum += log["loss_total"].item()
+                val_avg = val_loss_sum / max(1, len(self.valid_dl))
+                print(f"[Epoch {epoch+1}] val_loss={val_avg:.4f}")
+
+                if val_avg < self.best_val_loss:
+                    print(f"Validation loss improved from {self.best_val_loss:.4f} to {val_avg:.4f}. Saving best model...")
+                    self.best_val_loss = val_avg
+                    
+                    save_path = os.path.join(self.save_path, "best_model.pth")
+                    torch.save(self.model.model.state_dict(), save_path)
+                
+                last_path = os.path.join(self.save_path, "last_model.pth")
+                torch.save(self.model.model.state_dict(), last_path)
