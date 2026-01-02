@@ -100,13 +100,6 @@ def get_relative_motion(prev_pose, curr_pose):
     return dx, dy, d_theta
 
 
-def load_annotation(ann_path):
-    with open(ann_path) as f:
-        ann = json.load(f)
-
-    return ann
-    
-
 class OccTENSDataset(Dataset):
     def __init__(self, df, ann_path, num_frames=10, token_map_path='scene_output/tokens'):
         self.df = df

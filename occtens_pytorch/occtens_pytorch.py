@@ -183,5 +183,67 @@ class AutoRegressiveWrapper(nn.Module):
 
         return out
 
-    def generate(self, batch):
-        pass
+    @torch.no_grad()
+    def generate(self, scene_token_ids, motions, max_steps=None, temperature=1.0, top_k=None):
+        self.model.eval()
+        B, F, T = scene_token_ids.shape
+        device = scene_token_ids.device
+
+        scene_tokens = scene_token_ids.clone()
+        motion_tokens = motions.clone()
+
+        out = self.model(scene_token_ids=scene_tokens.to(self.device), motions=motion_tokens)
+
+        full_emb = out['full_embedding']
+        L = full_emb.size(1) - 1
+
+        token_ids  = rearrange(out['token_ids'],  'b f t -> b (f t)')     # (B, L)
+        frame_idx  = rearrange(out['frame_idx'],  'b f t -> b (f t)')     # (B, L)
+        token_type = rearrange(out['token_type'], 'b f t -> b (f t)')     # (B, L)
+
+        is_future = frame_idx >= self.context_point
+        is_motion = token_type == 0
+        is_scene  = token_type == 1
+
+        to_fill = is_future & (token_ids == self.ignore_index)
+
+        b_idx, l_idx = torch.nonzero(to_fill, as_tuple=True)
+        num_positions = b_idx.numel()
+
+        if max_steps is not None:
+            num_positions = min(num_positions, max_steps)
+
+        for step in range(num_positions):
+            b = b_idx[step]
+            l = l_idx[step]
+
+            out = self.model(scene_token_ids=scene_tokens, motions=motion_tokens)
+            x   = out['full_embedding'][:, :-1, :]
+            logits = self.lm_head(x)
+
+            logit_bl = logits[b, l] / temperature
+
+            if top_k is not None:
+                values, indices = torch.topk(logit_bl, top_k)
+                probs = F.softmax(values, dim=-1)
+                next_token = indices[torch.multinomial(probs, 1)]
+            else:
+                next_token = logit_bl.argmax(dim=-1)
+
+            next_token = next_token.long()
+
+            if is_motion[b, l]:
+                f = (l // T).item()
+                t = (l %  T).item()
+                motion_tokens[b, f, t] = next_token
+            elif is_scene[b, l]:
+                f = (l // T).item()
+                t = (l %  T).item()
+                scene_tokens[b, f, t] = next_token
+            else:
+                continue
+
+        return {
+            "scene_token_ids": scene_tokens,
+            "motions": motion_tokens,
+        }
