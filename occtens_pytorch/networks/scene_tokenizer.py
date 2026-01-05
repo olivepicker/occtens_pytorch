@@ -40,8 +40,8 @@ class VectorQuantizer(nn.Module):
 
         z_q = z_q_flat.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
 
-        codebook_loss = F.mse_loss(z_q.detach(), z)
-        commitment_loss = F.mse_loss(z_q, z.detach())
+        codebook_loss = F.mse_loss(z_q, z.detach())
+        commitment_loss = F.mse_loss(z_q.detach(), z)
         vq_loss = codebook_loss + self.beta * commitment_loss
 
         z_q_st = z + (z_q - z).detach()
@@ -153,7 +153,7 @@ class MultiScaleVQVAE(nn.Module):
         x_one_hot = F.one_hot(x, num_classes=18)
         #x_one_hot = F.one_hot(x_clamped, num_classes=18)
         #x_one_hot = x_one_hot * valid.unsqueeze(-1)
-        x = rearrange(x_one_hot, 'b z y x c ->  b (z c) y x').float()
+        x = rearrange(x_one_hot, 'b z y x c -> b (z c) y x').float()
         F_latent, indices_list, stats, vq_loss_sum = self.encode(x)
         x_hat = self.decode(F_latent, indices_list)
 
