@@ -150,51 +150,55 @@ def geo_scal_loss(pred, ssc_target, ignore_index=255, free_class=17, eps=1e-5):
 
     return loss_precision + loss_recall + loss_spec
 
-def sem_scal_loss(pred, ssc_target):
-    # Get softmax probabilities
+def sem_scal_loss(pred, ssc_target, ignore_index=255, eps=1e-5):
     pred = F.softmax(pred, dim=1)
-    loss = 0
-    count = 0
-    mask = ssc_target != 255
-    n_classes = pred.shape[1]
-    for i in range(0, n_classes):
+    num_classes = pred.shape[1]
+    
+    pred = pred.permute(0, 2, 3, 4, 1) 
+    mask = ssc_target != ignore_index
 
-        # Get probability of class i
-        p = pred[:, i, :, :, :]
+    if mask.sum() == 0:
+        return torch.tensor(0.0, device=pred.device, requires_grad=True)
 
-        # Remove unknown voxels
-        target_ori = ssc_target
-        p = p[mask]
-        target = ssc_target[mask]
+    p_valid = pred[mask] 
+    t_valid = ssc_target[mask]
+    t_onehot = F.one_hot(t_valid.long(), num_classes=num_classes).float()
 
-        completion_target = torch.ones_like(target)
-        completion_target[target != i] = 0
-        completion_target_ori = torch.ones_like(target_ori).float()
-        completion_target_ori[target_ori != i] = 0
-        if torch.sum(completion_target) > 0:
-            count += 1.0
-            nominator = torch.sum(p * completion_target)
-            loss_class = 0
-            if torch.sum(p) > 0:
-                precision = nominator / (torch.sum(p))
-                loss_precision = F.binary_cross_entropy(
-                    precision, torch.ones_like(precision)
-                )
-                loss_class += loss_precision
-            if torch.sum(completion_target) > 0:
-                recall = nominator / (torch.sum(completion_target))
-                loss_recall = F.binary_cross_entropy(recall, torch.ones_like(recall))
-                loss_class += loss_recall
-            if torch.sum(1 - completion_target) > 0:
-                specificity = torch.sum((1 - p) * (1 - completion_target)) / (
-                    torch.sum(1 - completion_target)
-                )
-                loss_specificity = F.binary_cross_entropy(
-                    specificity, torch.ones_like(specificity)
-                )
-                loss_class += loss_specificity
-            loss += loss_class
-    return loss / count
+    loss = 0.0
+    count = 0.0
+    
+    for i in range(num_classes):
+        if t_onehot[:, i].sum() == 0:
+            continue
+
+        p_i = p_valid[:, i]
+        t_i = t_onehot[:, i]
+
+        # Intersection (TP)
+        intersection = torch.sum(p_i * t_i)
+
+        # Precision Loss
+        precision = intersection / (torch.sum(p_i) + eps)
+        loss_precision = -torch.log(torch.clamp(precision, min=eps))
+
+        # Recall Loss
+        recall = intersection / (torch.sum(t_i) + eps)
+        loss_recall = -torch.log(torch.clamp(recall, min=eps))
+
+        spec_denom = torch.sum(1.0 - t_i) + eps
+        if spec_denom > eps:
+            specificity = torch.sum((1.0 - p_i) * (1.0 - t_i)) / spec_denom
+            loss_spec = -torch.log(torch.clamp(specificity, min=eps))
+        else:
+            loss_spec = 0.0
+
+        loss += loss_precision + loss_recall + loss_spec
+        count += 1.0
+
+    if count > 0:
+        return loss / count
+    else:
+        return torch.tensor(0.0, device=pred.device, requires_grad=True)
 
 class CustomSceneLoss(nn.Module):
     def __init__(
@@ -249,13 +253,13 @@ class CustomSceneLoss(nn.Module):
             logits_3d,
             target,
             #free_class=self.free_class_index,
-            #ignore_index=self.ignore_index
+            ignore_index=self.ignore_index
         )
 
         L_semscal = sem_scal_loss(
             logits_3d,
             target,
-            #ignore_index=self.ignore_index,
+            ignore_index=self.ignore_index,
             #n_classes = self.num_classes
         )
 

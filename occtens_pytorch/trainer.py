@@ -105,7 +105,7 @@ class SceneTokenizerTrainer(nn.Module):
             rec_loss = loss_dict["loss"]
             vq_loss = out['vq_loss_sum']
         
-        total_loss = rec_loss + vq_loss
+        total_loss = rec_loss
         total_loss.backward()
         self.optimizer.step()
 
@@ -127,7 +127,7 @@ class SceneTokenizerTrainer(nn.Module):
                 rec_loss = loss_dict["loss"]
                 vq_loss = out['vq_loss_sum']
             
-            total_loss = rec_loss + vq_loss
+            total_loss = rec_loss
 
         return {
             "loss_total": total_loss.detach(),
