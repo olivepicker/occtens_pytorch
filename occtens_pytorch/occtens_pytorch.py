@@ -192,7 +192,7 @@ class AutoRegressiveWrapper(nn.Module):
         scene_tokens = scene_token_ids.clone()
         motion_tokens = motions.clone()
 
-        out = self.model(scene_token_ids=scene_tokens.to(self.device), motions=motion_tokens)
+        out = self.model(scene_token_ids=scene_tokens, motions=motion_tokens)
 
         full_emb = out['full_embedding']
         L = full_emb.size(1) - 1

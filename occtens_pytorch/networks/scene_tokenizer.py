@@ -123,21 +123,20 @@ class MultiScaleVQVAE(nn.Module):
             indices_list.append(idx_s)      # (B, s, s)
             vq_loss_sum = vq_loss_sum + vq_loss_s
             
-            z = self.vq.codebook(idx_s).permute(0,3,1,2)
-            z = F.interpolate(z, size=(H_lat, W_lat), mode="nearest").contiguous()
+            z = F.interpolate(z_q_s, size=(H_lat, W_lat), mode="nearest").contiguous()
             f = f - self.phi_enc[idx](z)
 
             stats[f"perplexity_s{s}"] = perplex_s.detach()
 
         if return_token_only:
             return torch.cat(z_q_list, dim=2)
-        #return f, z_q_list, indices_list, vq_loss_sum, stats, skips
-        return f, indices_list, stats
+
+        return f, indices_list, stats, vq_loss_sum
 
     def decode(self, f, indices_list):
         B, D, H_lat, W_lat = f.shape
 
-        f = 0
+        f = torch.zeros(B, D, H_lat, W_lat, device=indices_list[0].device, dtype=self.vq.codebook.weight.dtype)
         for idx, idx_s in enumerate(indices_list):
             z = self.vq.codebook(idx_s).permute(0,3,1,2)
             z = F.interpolate(z, size=(H_lat, W_lat), mode="nearest").contiguous()
@@ -154,13 +153,14 @@ class MultiScaleVQVAE(nn.Module):
         x_one_hot = F.one_hot(x, num_classes=18)
         #x_one_hot = F.one_hot(x_clamped, num_classes=18)
         #x_one_hot = x_one_hot * valid.unsqueeze(-1)
-        x = rearrange(x_one_hot, 'b z y x c ->  (b c) z y x').float()
-        F_latent, indices_list, stats = self.encode(x)
+        x = rearrange(x_one_hot, 'b z y x c ->  b (z c) y x').float()
+        F_latent, indices_list, stats, vq_loss_sum = self.encode(x)
         x_hat = self.decode(F_latent, indices_list)
 
         stats['x'] = rearrange(x_one_hot, 'b z y x c -> b c z y x')
         stats['y'] = y
         stats['logits'] = x_hat
+        stats['vq_loss_sum'] = vq_loss_sum
 
         return stats
     
