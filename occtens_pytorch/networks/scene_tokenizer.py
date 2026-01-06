@@ -9,12 +9,10 @@ class VectorQuantizer(nn.Module):
         self, 
         num_codes: int, 
         code_dim: int, 
-        beta: float = 0.25
     ):
         super().__init__()
         self.num_codes = num_codes
         self.code_dim = code_dim
-        self.beta = beta
 
         self.codebook = nn.Embedding(num_codes, code_dim)
         nn.init.uniform_(self.codebook.weight, -1.0 / num_codes, 1.0 / num_codes)
@@ -36,20 +34,14 @@ class VectorQuantizer(nn.Module):
         z_q_flat = self.codebook(encoding_indices)
         z_q = z_q_flat.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
 
-        codebook_loss = F.mse_loss(z_q, z.detach())
-        commitment_loss = F.mse_loss(z_q.detach(), z)
-        vq_loss = codebook_loss + self.beta * commitment_loss
-        #print(f'codebook_loss: {codebook_loss}, commitment_loss{commitment_loss}')
-
         z_q_st = z + (z_q - z).detach()
 
         encodings_onehot = F.one_hot(encoding_indices, self.num_codes).float()  # (N, K)
         avg_probs = encodings_onehot.mean(dim=0)  # (K,)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
-
         indices = encoding_indices.view(B, H, W)
 
-        return z_q_st, indices, vq_loss, perplexity
+        return z_q, encoding_indices, perplexity
 
 class Phi(nn.Conv2d):
     def __init__(self, dim, quant_residual=0.5):
@@ -68,12 +60,14 @@ class MultiScaleVQVAE(nn.Module):
         num_codes: int = 4096,
         scales = (1,5,10,15,20,25),
         enc_kernel_size = [4,4,4,3],
-        quant_residual = 0.5
+        quant_residual = 0.5,
+        beta = 0.25,
     ):
         super().__init__()
     
         self.scales = list(scales)
         self.num_codes = num_codes
+        self.beta = beta
 
         # VQ
         self.vq = VectorQuantizer(num_codes=num_codes, code_dim=latent_dim)
@@ -99,10 +93,18 @@ class MultiScaleVQVAE(nn.Module):
             #kernel_size=enc_kernel_size[::-1]
         )
 
+        self.pre_quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=3, stride=1, padding=3//2)
+        self.post_quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=3, stride=1, padding=3//2)
+
     def encode(self, x, return_token_only=False):
         stats = {}
 
-        f = self.encoder(x)  # (B, D, H_lat, W_lat), latent space
+        f = self.pre_quant_conv(self.encoder(x))  # (B, D, H_lat, W_lat), latent space
+        
+        f_no_grad = f.detach()
+        f_rest = f_no_grad.clone()
+        f_hat = torch.zeros_like(f_rest)
+
         B, D, H_lat, W_lat = f.shape
 
         z_q_list = []
@@ -110,37 +112,31 @@ class MultiScaleVQVAE(nn.Module):
         vq_loss_sum = 0.0
 
         for idx, s in enumerate(self.scales):
-            if s == H_lat and s == W_lat:
-                f_hat = f
-            else:
-                f_hat = F.interpolate(f, size=(s, s), mode="area")
 
-            z_q_s, idx_s, vq_loss_s, perplex_s = self.vq(f_hat)
+            f_rest_nc = F.interpolate(f_rest, size=(s, s), mode="area")
+
+            z_q_s, idx_s, perplex_s = self.vq(f_rest_nc)
 
             z_q_list.append(z_q_s.view(B, D, -1))   # (B, D, s, s)
             indices_list.append(idx_s)      # (B, s, s)
-            vq_loss_sum = vq_loss_sum + vq_loss_s
             
             z = F.interpolate(z_q_s, size=(H_lat, W_lat), mode="bicubic").contiguous()
-            f = f - self.phi_enc[idx](z)
+            f_p = self.phi_enc[idx](z)
+            f_hat = f_hat + f_p
+            f_rest = f_rest - f_p
 
+            vq_loss_sum += F.mse_loss(f_hat.data, f) * self.beta + F.mse_loss(f_hat, f_no_grad)
             stats[f"perplexity_s{s}"] = perplex_s.detach()
 
         if return_token_only:
             return torch.cat(z_q_list, dim=2)
 
-        return f, indices_list, stats, vq_loss_sum / len(self.scales)
+        f_hat = (f_hat.data - f_no_grad).add_(f)
 
-    def decode(self, f, indices_list):
-        B, D, H_lat, W_lat = f.shape
+        return f_hat, indices_list, stats, vq_loss_sum / len(self.scales)
 
-        f = torch.zeros(B, D, H_lat, W_lat, device=indices_list[0].device, dtype=self.vq.codebook.weight.dtype)
-        for idx, idx_s in enumerate(indices_list):
-            z = self.vq.codebook(idx_s).permute(0,3,1,2)
-            z = F.interpolate(z, size=(H_lat, W_lat), mode="bicubic").contiguous()
-            f = f + self.phi_dec[idx](z)
-
-        return self.decoder(f)
+    # def decode(self, f_hat):
+    #     return self.decoder(f_hat)
 
     def forward(self, x, mask=None):
         B, Z, Y, X = x.size()
@@ -158,8 +154,8 @@ class MultiScaleVQVAE(nn.Module):
         if rem != 0:
             x = F.pad(x, (0, rem, 0, rem))
 
-        F_latent, indices_list, stats, vq_loss_sum = self.encode(x)
-        x_hat = self.decode(F_latent, indices_list)[...,:H,:W]
+        f_hat, indices_list, stats, vq_loss_sum = self.encode(x)
+        x_hat = self.decoder(self.post_quant_conv(f_hat))[...,:H,:W]
 
         stats['x'] = rearrange(x_one_hot, 'b z y x c -> b c z y x')
         stats['y'] = y
