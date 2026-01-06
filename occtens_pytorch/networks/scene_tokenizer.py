@@ -90,13 +90,13 @@ class MultiScaleVQVAE(nn.Module):
             in_channels=in_channels, 
             hidden_channels=hidden_channels, 
             latent_dim=latent_dim, 
-            kernel_size=enc_kernel_size
+            #kernel_size=enc_kernel_size
         )
         self.decoder = Decoder(
             in_channels=in_channels,
             hidden_channels=hidden_channels, 
             latent_dim=latent_dim, 
-            kernel_size=enc_kernel_size[::-1]
+            #kernel_size=enc_kernel_size[::-1]
         )
 
     def encode(self, x, return_token_only=False):
@@ -129,7 +129,7 @@ class MultiScaleVQVAE(nn.Module):
         if return_token_only:
             return torch.cat(z_q_list, dim=2)
 
-        return f, indices_list, stats, vq_loss_sum
+        return f, indices_list, stats, vq_loss_sum / len(self.scales)
 
     def decode(self, f, indices_list):
         B, D, H_lat, W_lat = f.shape
@@ -145,15 +145,21 @@ class MultiScaleVQVAE(nn.Module):
     def forward(self, x, mask=None):
         B, Z, Y, X = x.size()
         y = x.clone().long()
-        #y.masked_fill_(~mask.bool(), 255)
+        y.masked_fill_(~mask.bool(), 255)
         #x.masked_fill_(~mask.bool(), 17)
         
         x_one_hot = F.one_hot(x, num_classes=18)
         #x_one_hot = F.one_hot(x_clamped, num_classes=18)
         #x_one_hot = x_one_hot * valid.unsqueeze(-1)
         x = rearrange(x_one_hot, 'b z y x c -> b (z c) y x').float()
+
+        B, C, H, W = x.size()
+        rem = H % 2**4
+        if rem != 0:
+            x = F.pad(x, (0, rem, 0, rem))
+
         F_latent, indices_list, stats, vq_loss_sum = self.encode(x)
-        x_hat = self.decode(F_latent, indices_list)
+        x_hat = self.decode(F_latent, indices_list)[...,:H,:W]
 
         stats['x'] = rearrange(x_one_hot, 'b z y x c -> b c z y x')
         stats['y'] = y
@@ -161,57 +167,111 @@ class MultiScaleVQVAE(nn.Module):
         stats['vq_loss_sum'] = vq_loss_sum
 
         return stats
+
+
+# Upsample, Downsample class
+# https://github.com/FoundationVision/VAR/blob/78b95394fc5896192e3a003e4b295f8ea743c48f/models/basic_vae.py#L22
+
+class Upsample2x(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
     
+    def forward(self, x):
+        return self.conv(F.interpolate(x, scale_factor=2, mode='nearest'))
+
+
+class Downsample2x(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=0)
+    
+    def forward(self, x):
+        return self.conv(F.pad(x, pad=(0, 1, 0, 1), mode='constant', value=0))
+
+
+class ResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels=None, drop_rate=0.0):
+        super().__init__()
+
+        if out_channels == None:
+            out_chanenls = in_channels
+
+        if out_channels != in_channels:
+            self.shortcut_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+        else:
+            self.shortcut_conv = nn.Identity()
+            
+        self.block0 = nn.Sequential(
+            nn.GroupNorm(32, in_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
+        )
+        self.block1 = nn.Sequential(
+            nn.GroupNorm(32, out_channels),
+            nn.SiLU(inplace=True),
+            nn.Dropout(drop_rate),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
+        )
+        
+    def forward(self, x):
+        x0 = self.block0(x)
+        x1 = self.block1(x0)
+
+        return self.shortcut_conv(x) + x1
+
+
 class Encoder(nn.Module):
     def __init__(
         self, 
+        *,
         in_channels: int, 
         hidden_channels: int,
         latent_dim: int,
-        kernel_size = [3,4,4,4],
+        multiple = (1,2,4,8)
     ):
         super().__init__()
-        self.comp = nn.Sequential(
-            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1, bias=False),
-            nn.GroupNorm(num_groups=8, num_channels=hidden_channels),
-            nn.ReLU(inplace=True)
-        )
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=kernel_size[0], stride=2, padding=1),
-            nn.ReLU(inplace=True),
-        )
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=kernel_size[1], stride=2, padding=1),
-            nn.ReLU(inplace=True),
-        )
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=kernel_size[2], stride=2, padding=1),
-            nn.ReLU(inplace=True),
-        )
-        self.to_latent = nn.Conv2d(hidden_channels, latent_dim, kernel_size=kernel_size[3], stride=1, padding=1)
 
-    def forward(self, x):
-        x0 = self.comp(x)
-        x1 = self.conv1(x0)
-        x2 = self.conv2(x1)
-        x3 = self.conv3(x2)
-        f  = self.to_latent(x3)
+        self.init_conv = nn.Conv2d(in_channels, hidden_channels, kernel_size=3, stride=1, padding=1)
+
+        self.down0 = nn.Sequential(
+            ResBlock(hidden_channels * 1, hidden_channels * 1),
+            ResBlock(hidden_channels * 1, hidden_channels * 1),
+            Downsample2x(hidden_channels * 1)
+        )
+        
+        self.down1 = nn.Sequential(
+            ResBlock(hidden_channels * 1, hidden_channels * 2),
+            ResBlock(hidden_channels * 2, hidden_channels * 2),
+            Downsample2x(hidden_channels * 2)
+        )
+        self.down2 = nn.Sequential(
+            ResBlock(hidden_channels * 2, hidden_channels * 4),
+            ResBlock(hidden_channels * 4, hidden_channels * 4),
+            Downsample2x(hidden_channels * 4)
+        )
+
+        self.down3 = nn.Sequential(
+            ResBlock(hidden_channels * 4, hidden_channels * 8),
+            ResBlock(hidden_channels * 8, hidden_channels * 8),
+            Downsample2x(hidden_channels * 8)
+        )
+        self.to_latent = nn.Sequential(
+            nn.GroupNorm(32, hidden_channels * 8),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden_channels * 8, latent_dim, kernel_size=3, stride=1, padding=1)
+        )
+
+    def forward(self, x):                
+        x0 = self.init_conv(x)
+        x1 = self.down0(x0)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        f  = self.to_latent(x4)
 
         return f
     
-class ResBlock(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.GroupNorm(8, channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
-            nn.GroupNorm(8, channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
-        )
-    def forward(self, x):
-        return x + self.block(x)
 
 class Decoder(nn.Module):
     def __init__(
@@ -219,46 +279,45 @@ class Decoder(nn.Module):
         in_channels: int, 
         hidden_channels: int, 
         latent_dim: int, 
-        kernel_size = [4,4,3,4]
+        multiple = (1,2,4,8)
     ):
         super().__init__()
-        self.conv0 = nn.Conv2d(latent_dim, hidden_channels, kernel_size=3, padding=1)
+        self.init_conv = nn.Conv2d(latent_dim, hidden_channels * 8, kernel_size=3, stride=1, padding=1)
 
-        self.up1 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
-            ResBlock(hidden_channels),
+        self.down0 = nn.Sequential(
+            ResBlock(hidden_channels * 8, hidden_channels * 8),
+            ResBlock(hidden_channels * 8, hidden_channels * 8),
+            Upsample2x(hidden_channels * 8)
+        )
+        
+        self.down1 = nn.Sequential(
+            ResBlock(hidden_channels * 8, hidden_channels * 4),
+            ResBlock(hidden_channels * 4, hidden_channels * 4),
+            Upsample2x(hidden_channels * 4)
+        )
+        self.down2 = nn.Sequential(
+            ResBlock(hidden_channels * 4, hidden_channels * 2),
+            ResBlock(hidden_channels * 2, hidden_channels * 2),
+            Upsample2x(hidden_channels * 2)
         )
 
-        self.up2 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
-            ResBlock(hidden_channels),
+        self.down3 = nn.Sequential(
+            ResBlock(hidden_channels * 2, hidden_channels * 1),
+            ResBlock(hidden_channels * 1, hidden_channels * 1),
+            Upsample2x(hidden_channels * 1)
         )
-
-        self.up3 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
-            ResBlock(hidden_channels),
+        self.to_latent = nn.Sequential(
+            nn.GroupNorm(32, hidden_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden_channels, in_channels, kernel_size=3, stride=1, padding=1)
         )
-
-        self.refinement = nn.Sequential(
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(8, hidden_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(8, hidden_channels),
-            nn.ReLU(inplace=True),
-        )
-
-        self.decomp = nn.Conv2d(hidden_channels, in_channels, kernel_size=1)
 
     def forward(self, f):
-        x = self.conv0(f)
-        x = self.up1(x)
-        x = self.up2(x)
-        x = self.up3(x)
-        
-        x = self.refinement(x)
-        
-        return self.decomp(x)
+        x4 = self.init_conv(f)
+        x3 = self.down0(x4)
+        x2 = self.down1(x3)
+        x1 = self.down2(x2)
+        x0 = self.down3(x1)
+        f = self.to_latent(x0)
+
+        return f
