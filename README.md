@@ -7,8 +7,8 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
     - [x] Implement VQ-VAE
         - [x] *Residual Block*
     - [x] Multi-Scale Quantizer
-        - [ ] *Develop Phi*
-        - [ ] *Normalize* 
+        - [x] *Develop Phi*
+        - [x] *Normalize* 
 - [x] **Motion Tokenizer**
 - [ ] **World Model**
     - [x] Implement TENSFormer

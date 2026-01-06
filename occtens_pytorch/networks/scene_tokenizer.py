@@ -27,17 +27,13 @@ class VectorQuantizer(nn.Module):
         z_perm = z.permute(0, 2, 3, 1).contiguous()  # (B, H, W, C)
         z_flat = z_perm.view(-1, C)                  # (N, C), N = B*H*W
 
-        codebook = self.codebook.weight              # (K, C)
+        z_norm = F.normalize(z_flat, dim=1)
+        codebook_norm = F.normalize(self.codebook.weight, dim=1)
 
-        # ||z - e||^2 = ||z||^2 + ||e||^2 - 2 z·e
-        z_sq = (z_flat ** 2).sum(dim=1, keepdim=True)    # (N, 1)
-        e_sq = (codebook ** 2).sum(dim=1)                # (K,)
-        ze = z_flat @ codebook.t()                       # (N, K)
-        distances = z_sq + e_sq - 2 * ze                 # (N, K)
+        sim = z_norm @ codebook_norm.t()
+        encoding_indices = torch.argmax(sim, dim=1)
 
-        encoding_indices = torch.argmin(distances, dim=1)  # (N,)
-        z_q_flat = self.codebook(encoding_indices)         # (N, C)
-
+        z_q_flat = self.codebook(encoding_indices)
         z_q = z_q_flat.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
 
         codebook_loss = F.mse_loss(z_q, z.detach())
@@ -55,6 +51,14 @@ class VectorQuantizer(nn.Module):
 
         return z_q_st, indices, vq_loss, perplexity
 
+class Phi(nn.Conv2d):
+    def __init__(self, dim, quant_residual=0.5):
+        super().__init__(in_channels=dim, out_channels=dim, kernel_size=3, padding=1)
+        self.resi_ratio = abs(quant_residual)
+
+    def forward(self, h):
+        return h * (1 - self.resi_ratio) + super().forward(h) * self.resi_ratio
+
 class MultiScaleVQVAE(nn.Module):
     def __init__(
         self,
@@ -62,8 +66,9 @@ class MultiScaleVQVAE(nn.Module):
         hidden_channels: int = 128,
         latent_dim: int = 128,
         num_codes: int = 4096,
-        scales=(1,5,10,15,20,25),
-        enc_kernel_size=[4,4,4,3]
+        scales = (1,5,10,15,20,25),
+        enc_kernel_size = [4,4,4,3],
+        quant_residual = 0.5
     ):
         super().__init__()
     
@@ -74,19 +79,11 @@ class MultiScaleVQVAE(nn.Module):
         self.vq = VectorQuantizer(num_codes=num_codes, code_dim=latent_dim)
 
         self.phi_enc = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
-                nn.ReLU(inplace=True),
-            )
-            for _ in self.scales
+            Phi(latent_dim, quant_residual=quant_residual) for _ in self.scales
         ])
 
         self.phi_dec = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
-                nn.ReLU(inplace=True),
-            )
-            for _ in self.scales
+            Phi(latent_dim, quant_residual=quant_residual) for _ in self.scales
         ])
 
         self.encoder = Encoder(
@@ -124,7 +121,7 @@ class MultiScaleVQVAE(nn.Module):
             indices_list.append(idx_s)      # (B, s, s)
             vq_loss_sum = vq_loss_sum + vq_loss_s
             
-            z = F.interpolate(z_q_s, size=(H_lat, W_lat), mode="nearest").contiguous()
+            z = F.interpolate(z_q_s, size=(H_lat, W_lat), mode="bicubic").contiguous()
             f = f - self.phi_enc[idx](z)
 
             stats[f"perplexity_s{s}"] = perplex_s.detach()
@@ -140,7 +137,7 @@ class MultiScaleVQVAE(nn.Module):
         f = torch.zeros(B, D, H_lat, W_lat, device=indices_list[0].device, dtype=self.vq.codebook.weight.dtype)
         for idx, idx_s in enumerate(indices_list):
             z = self.vq.codebook(idx_s).permute(0,3,1,2)
-            z = F.interpolate(z, size=(H_lat, W_lat), mode="nearest").contiguous()
+            z = F.interpolate(z, size=(H_lat, W_lat), mode="bicubic").contiguous()
             f = f + self.phi_dec[idx](z)
 
         return self.decoder(f)
