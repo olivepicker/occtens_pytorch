@@ -141,21 +141,20 @@ class MultiScaleVQVAE(nn.Module):
     def forward(self, x, mask=None):
         B, Z, Y, X = x.size()
         y = x.clone().long()
-        y.masked_fill_(~mask.bool(), 255)
-        #x.masked_fill_(~mask.bool(), 17)
+
+        # if mask is not None:
+        #     y.masked_fill_(~mask.bool(), 255)
         
         x_one_hot = F.one_hot(x, num_classes=18)
-        #x_one_hot = F.one_hot(x_clamped, num_classes=18)
-        #x_one_hot = x_one_hot * valid.unsqueeze(-1)
         x = rearrange(x_one_hot, 'b z y x c -> b (z c) y x').float()
 
-        B, C, H, W = x.size()
-        rem = H % 2**4
-        if rem != 0:
-            x = F.pad(x, (0, rem, 0, rem))
+        # B, C, H, W = x.size()
+        # rem = H % 2**4
+        # if rem != 0:
+        #     x = F.pad(x, (0, rem, 0, rem))
 
         f_hat, indices_list, stats, vq_loss_sum = self.encode(x)
-        x_hat = self.decoder(self.post_quant_conv(f_hat))[...,:H,:W]
+        x_hat = self.decoder(self.post_quant_conv(f_hat))#[...,:H,:W]
 
         stats['x'] = rearrange(x_one_hot, 'b z y x c -> b c z y x')
         stats['y'] = y
@@ -180,10 +179,10 @@ class Upsample2x(nn.Module):
 class Downsample2x(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
-        self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=0)
+        self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=1)
     
     def forward(self, x):
-        return self.conv(F.pad(x, pad=(0, 1, 0, 1), mode='constant', value=0))
+        return self.conv(x)
 
 
 class ResBlock(nn.Module):
@@ -250,8 +249,8 @@ class Encoder(nn.Module):
         self.down3 = nn.Sequential(
             ResBlock(hidden_channels * 4, hidden_channels * 8),
             ResBlock(hidden_channels * 8, hidden_channels * 8),
-            Downsample2x(hidden_channels * 8)
         )
+
         self.to_latent = nn.Sequential(
             nn.GroupNorm(32, hidden_channels * 8),
             nn.SiLU(inplace=True),
@@ -283,7 +282,6 @@ class Decoder(nn.Module):
         self.down0 = nn.Sequential(
             ResBlock(hidden_channels * 8, hidden_channels * 8),
             ResBlock(hidden_channels * 8, hidden_channels * 8),
-            Upsample2x(hidden_channels * 8)
         )
         
         self.down1 = nn.Sequential(
