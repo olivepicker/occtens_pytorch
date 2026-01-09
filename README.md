@@ -12,12 +12,12 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
         - [ ] *Attention Layer in Encoder / Decoder*
 
 - [x] **Motion Tokenizer**
-- [ ] **World Model**
+- [x] **World Model**
     - [x] Implement TENSFormer
         - [x] *Attention Mask - Temporal, Spatial*
     - [x] Temporal Scene-by-scene Prediction
     - [x] Spatial Scale-by-scale Generation
-    - [ ] Multi-modal Camera Pose Aggregation
+    - [x] Multi-modal Camera Pose Aggregation
     - [x] Auto-Regressive Wrapper
 - [x] **Train / Inference Pipeline**
     - [x] Implement Losses
