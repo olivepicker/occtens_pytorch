@@ -10,7 +10,7 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
         - [x] *Develop Phi*
         - [x] *Normalize* 
         - [ ] *Attention Layer in Encoder / Decoder*
-        - [ ] *
+
 - [x] **Motion Tokenizer**
 - [ ] **World Model**
     - [x] Implement TENSFormer
@@ -19,10 +19,10 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
     - [x] Spatial Scale-by-scale Generation
     - [ ] Multi-modal Camera Pose Aggregation
     - [x] Auto-Regressive Wrapper
-- [ ] **Train / Inference Pipeline**
+- [x] **Train / Inference Pipeline**
     - [x] Implement Losses
-    - [ ] Train base model
-    - [ ] Generate
+    - [x] Train base model
+    - [x] Generate
 
 ## Usage
 ```python
@@ -87,11 +87,14 @@ trainer = OccTENSTrainer(       # AutoRegressive Training
     valid_ds = valid_ds,
     batch_size = 2,
     device = 'cuda',
-    autocast_enabled = True,    # Autocast not been tested!
+    autocast_enabled = True,    # Now autocast works!
     context_frame_point = 3
 )
 
 trainer.train(num_epochs=100)
+
+
+# Generate
 ```
 
 ## Citations

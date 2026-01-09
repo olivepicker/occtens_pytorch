@@ -61,12 +61,14 @@ class MultiScaleVQVAE(nn.Module):
         scales = (1,5,10,15,20,25),
         quant_residual = 0.5,
         beta = 0.25,
+        num_classes = 18
     ):
         super().__init__()
     
         self.scales = list(scales)
         self.num_codes = num_codes
         self.beta = beta
+        self.num_classes = num_classes
 
         # VQ
         self.vq = VectorQuantizer(num_codes=num_codes, code_dim=latent_dim)
@@ -125,8 +127,34 @@ class MultiScaleVQVAE(nn.Module):
 
         return f_hat, indices_list, stats, vq_loss_sum / len(self.scales)
 
-    # def decode(self, f_hat):
-    #     return self.decoder(f_hat)
+    @torch.no_grad()
+    def decode_from_indices(self, indices_list, out_zyx = True):
+        assert isinstance(indices_list, (list, tuple)), "indices_list must be a list/tuple"
+        assert len(indices_list) == len(self.scales), f"indices_list length {len(indices_list)} != num_scales {len(self.scales)}"
+
+        device = indices_list[0].device
+        dtype = self.vq.codebook.weight.dtype
+
+        B = indices_list[0].shape[0]
+        D = self.vq.code_dim if hasattr(self.vq, "code_dim") else self.vq.codebook.embedding_dim
+
+        H_lat = W_lat = self.scales[-1]
+        f = torch.zeros((B, D, H_lat, W_lat), device=device, dtype=dtype)
+
+        for idx, idx_s in enumerate(indices_list):
+            z = self.vq.codebook(idx_s).permute(0,3,1,2)
+            z = F.interpolate(z, size=(H_lat, W_lat), mode="bicubic").contiguous()
+            f += self.phi[idx](z)
+
+        logits = self.decoder(self.post_quant_conv(f))
+
+        if out_zyx:
+            logits_3d = rearrange(logits, "b (z c) y x -> b c z y x", c=self.num_classes).contiguous()
+            pred_3d = logits_3d.argmax(dim=1)
+
+            return pred_3d
+
+        return logits
 
     def forward(self, x, mask=None, return_token_only=False):
         B, Z, Y, X = x.size()
@@ -135,20 +163,15 @@ class MultiScaleVQVAE(nn.Module):
         if mask is not None:
             y.masked_fill_(~mask.bool(), 255)
         
-        x_one_hot = F.one_hot(x, num_classes=18)
+        x_one_hot = F.one_hot(x, num_classes=self.num_classes)
         x = rearrange(x_one_hot, 'b z y x c -> b (z c) y x').float()
-
-        # B, C, H, W = x.size()
-        # rem = H % 2**4
-        # if rem != 0:
-        #     x = F.pad(x, (0, rem, 0, rem))
 
         f_hat, indices_list, stats, vq_loss_sum = self.encode(x)
 
         if return_token_only:
             return indices_list
             
-        x_hat = self.decoder(self.post_quant_conv(f_hat))#[...,:H,:W]
+        x_hat = self.decoder(self.post_quant_conv(f_hat))
 
         stats['x'] = rearrange(x_one_hot, 'b z y x c -> b c z y x')
         stats['y'] = y
