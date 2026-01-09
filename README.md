@@ -23,6 +23,7 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
     - [x] Implement Losses
     - [x] Train base model
     - [x] Generate
+    - [ ] Validate forecasting performance
 
 ## Usage
 ```python

@@ -24,7 +24,6 @@ class OccTENS(nn.Module):
         scene_latent_dim = 128,
         scene_num_codes = 4096,
         scene_scales = (1, 5, 10, 15, 20, 25),
-        scene_enc_kernel_size = (4, 4, 4, 3),
         motion_x_range = (-1, 1),
         motion_y_range = (-1, 1),
         motion_t_range = (-np.pi, np.pi),
@@ -43,7 +42,6 @@ class OccTENS(nn.Module):
                 latent_dim = scene_latent_dim,
                 num_codes = scene_num_codes,
                 scales = scene_scales,
-                enc_kernel_size = scene_enc_kernel_size
             ).eval()
 
         if scene_weight_path is not None:
