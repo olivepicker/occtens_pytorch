@@ -43,11 +43,10 @@ class SceneTokenizerTrainer(nn.Module):
         self.optimizer = optimizer
         self.device = device
 
-        self.train_ds = train_ds
-        self.valid_ds = valid_ds
-
-        if save_token:
-            self.valid_ds = ConcatDataset([train_ds, valid_ds])
+        self.save_token = save_token
+        if self.save_token:
+            print('train_ds, valid_ds concatenated for save token')
+            valid_ds = ConcatDataset([train_ds, valid_ds])
 
         self.train_dl = DataLoader(
             train_ds,
@@ -167,10 +166,12 @@ class SceneTokenizerTrainer(nn.Module):
                 last_path = os.path.join(self.save_path, "last_model.pth")
                 torch.save(self.model.state_dict(), last_path)
 
-    def save_token(self):
+    def save_token_all(self):
+        assert self.save_token == True, 'save_token should be True when save token'
         self.model.eval()
-        token_save_path = f'{self.save_path}/tokens/'
-        if os.path.exists(token_save_path):
+        token_save_path = os.path.join(f'{self.save_path}', 'tokens')
+
+        if os.path.exists(token_save_path) == False:
             os.makedirs(token_save_path)
 
         for idx, batch in tqdm(enumerate(self.valid_dl), total=len(self.valid_dl)):
@@ -179,7 +180,7 @@ class SceneTokenizerTrainer(nn.Module):
             B = batch['semantic'].size(0)
 
             with torch.no_grad():
-                _, tokens, _ = self.model.encode(batch['semantic'])
+                tokens = self.model(batch['semantic'], return_token_only=True)
                 tokens = [rearrange(i, 'b x y -> b (x y)') for i in tokens]
                 tokens = torch.cat(tokens, dim=1).detach().cpu().numpy()
 

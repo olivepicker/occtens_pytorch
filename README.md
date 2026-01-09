@@ -9,6 +9,8 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
     - [x] Multi-Scale Quantizer
         - [x] *Develop Phi*
         - [x] *Normalize* 
+        - [ ] *Attention Layer in Encoder / Decoder*
+        - [ ] *
 - [x] **Motion Tokenizer**
 - [ ] **World Model**
     - [x] Implement TENSFormer
@@ -44,7 +46,8 @@ trainer = SceneTokenizerTrainer(
     device = 'cuda',
 )
 
-trainer.train(num_epochs=200)
+trainer.train(num_epochs=100)
+
 
 # Save token maps
 ...
@@ -59,7 +62,7 @@ trainer = SceneTokenizerTrainer(
     save_token = True   # If True, valid_ds will be concatenated with train_ds to tokenize the entire dataset.
 )
 
-trainer.save_token()
+trainer.save_token_all()
 ```
 
 ```python
@@ -88,7 +91,7 @@ trainer = OccTENSTrainer(       # AutoRegressive Training
     context_frame_point = 3
 )
 
-trainer.train(num_epochs=50)
+trainer.train(num_epochs=100)
 ```
 
 ## Citations

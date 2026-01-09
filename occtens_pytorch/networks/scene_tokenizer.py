@@ -41,7 +41,7 @@ class VectorQuantizer(nn.Module):
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
         indices = encoding_indices.view(B, H, W)
 
-        return z_q, encoding_indices, perplexity
+        return z_q, indices, perplexity
 
 class Phi(nn.Conv2d):
     def __init__(self, dim, quant_residual=0.5):
@@ -59,7 +59,6 @@ class MultiScaleVQVAE(nn.Module):
         latent_dim: int = 128,
         num_codes: int = 4096,
         scales = (1,5,10,15,20,25),
-        enc_kernel_size = [4,4,4,3],
         quant_residual = 0.5,
         beta = 0.25,
     ):
@@ -72,11 +71,7 @@ class MultiScaleVQVAE(nn.Module):
         # VQ
         self.vq = VectorQuantizer(num_codes=num_codes, code_dim=latent_dim)
 
-        self.phi_enc = nn.ModuleList([
-            Phi(latent_dim, quant_residual=quant_residual) for _ in self.scales
-        ])
-
-        self.phi_dec = nn.ModuleList([
+        self.phi = nn.ModuleList([
             Phi(latent_dim, quant_residual=quant_residual) for _ in self.scales
         ])
 
@@ -84,19 +79,17 @@ class MultiScaleVQVAE(nn.Module):
             in_channels=in_channels, 
             hidden_channels=hidden_channels, 
             latent_dim=latent_dim, 
-            #kernel_size=enc_kernel_size
         )
         self.decoder = Decoder(
             in_channels=in_channels,
             hidden_channels=hidden_channels, 
             latent_dim=latent_dim, 
-            #kernel_size=enc_kernel_size[::-1]
         )
 
         self.pre_quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=3, stride=1, padding=3//2)
         self.post_quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=3, stride=1, padding=3//2)
 
-    def encode(self, x, return_token_only=False):
+    def encode(self, x):
         stats = {}
 
         f = self.pre_quant_conv(self.encoder(x))  # (B, D, H_lat, W_lat), latent space
@@ -121,16 +114,13 @@ class MultiScaleVQVAE(nn.Module):
             indices_list.append(idx_s)      # (B, s, s)
             
             z = F.interpolate(z_q_s, size=(H_lat, W_lat), mode="bicubic").contiguous()
-            f_p = self.phi_enc[idx](z)
+            f_p = self.phi[idx](z)
             f_hat = f_hat + f_p
             f_rest = f_rest - f_p
 
             vq_loss_sum += F.mse_loss(f_hat.data, f) * self.beta + F.mse_loss(f_hat, f_no_grad)
             stats[f"perplexity_s{s}"] = perplex_s.detach()
-
-        if return_token_only:
-            return torch.cat(z_q_list, dim=2)
-
+    
         f_hat = (f_hat.data - f_no_grad).add_(f)
 
         return f_hat, indices_list, stats, vq_loss_sum / len(self.scales)
@@ -138,12 +128,12 @@ class MultiScaleVQVAE(nn.Module):
     # def decode(self, f_hat):
     #     return self.decoder(f_hat)
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask=None, return_token_only=False):
         B, Z, Y, X = x.size()
         y = x.clone().long()
 
-        # if mask is not None:
-        #     y.masked_fill_(~mask.bool(), 255)
+        if mask is not None:
+            y.masked_fill_(~mask.bool(), 255)
         
         x_one_hot = F.one_hot(x, num_classes=18)
         x = rearrange(x_one_hot, 'b z y x c -> b (z c) y x').float()
@@ -154,6 +144,10 @@ class MultiScaleVQVAE(nn.Module):
         #     x = F.pad(x, (0, rem, 0, rem))
 
         f_hat, indices_list, stats, vq_loss_sum = self.encode(x)
+
+        if return_token_only:
+            return indices_list
+            
         x_hat = self.decoder(self.post_quant_conv(f_hat))#[...,:H,:W]
 
         stats['x'] = rearrange(x_one_hot, 'b z y x c -> b c z y x')
