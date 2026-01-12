@@ -160,8 +160,8 @@ class MultiScaleVQVAE(nn.Module):
         B, Z, Y, X = x.size()
         y = x.clone().long()
 
-        if mask is not None:
-            y.masked_fill_(~mask.bool(), 255)
+        # if mask is not None:
+        #     y.masked_fill_(~mask.bool(), 255) # Commented out masking for Channel 17 (free) due to training issues. 
         
         x_one_hot = F.one_hot(x, num_classes=self.num_classes)
         x = rearrange(x_one_hot, 'b z y x c -> b (z c) y x').float()
