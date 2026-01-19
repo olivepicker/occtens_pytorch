@@ -194,7 +194,7 @@ class OccTENSDataset(Dataset):
 
         max_index = len(d) - self.num_frames
         start = np.random.randint(0, max_index)
-
+        
         for i in range(start, start + self.num_frames):
             scene_id = d.iloc[i].scene
             curr_id = d.iloc[i].scene_id
