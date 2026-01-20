@@ -85,6 +85,7 @@ class SceneTokenizerTrainer(nn.Module):
             'dtype':autocast_dtype,
             'enabled':autocast_enabled
         }
+        self.scaler = torch.amp.GradScaler(enabled=autocast_enabled)
 
         self.save_path = save_path
         if os.path.exists(self.save_path)==False:
@@ -104,10 +105,10 @@ class SceneTokenizerTrainer(nn.Module):
             rec_loss = loss_dict["loss"]
             vq_loss = out['vq_loss_sum']
         
-        #print(loss_dict)
         total_loss = rec_loss + vq_loss
-        total_loss.backward()
-        self.optimizer.step()
+        self.scaler.scale(total_loss).backward()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
 
         return {
             "loss_total": total_loss.detach(),
@@ -245,6 +246,7 @@ class OccTENSTrainer(nn.Module):
             'dtype':autocast_dtype,
             'enabled':autocast_enabled
         }
+        self.scaler = torch.amp.GradScaler(enabled=autocast_enabled)
 
         self.beta_scene = beta_scene
         self.beta_motion = beta_motion
@@ -264,8 +266,9 @@ class OccTENSTrainer(nn.Module):
             out = self.model(scene_token_ids=scene_token_ids, motions=motions)
             loss = out['scene_loss'] * self.beta_scene + out['motion_loss'] * self.beta_motion
 
-        loss.backward()
-        self.optimizer.step()
+        self.scaler.scale(loss).backward()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
 
         return {
             "loss_total": loss.detach(),

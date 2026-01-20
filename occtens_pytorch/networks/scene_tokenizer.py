@@ -43,6 +43,7 @@ class VectorQuantizer(nn.Module):
 
         return z_q, indices, perplexity
 
+
 class Phi(nn.Conv2d):
     def __init__(self, dim, quant_residual=0.5):
         super().__init__(in_channels=dim, out_channels=dim, kernel_size=3, padding=1)
@@ -50,6 +51,7 @@ class Phi(nn.Conv2d):
 
     def forward(self, h):
         return h * (1 - self.resi_ratio) + super().forward(h) * self.resi_ratio
+
 
 class MultiScaleVQVAE(nn.Module):
     def __init__(
@@ -234,6 +236,34 @@ class ResBlock(nn.Module):
         return self.shortcut_conv(x) + x1
 
 
+class AttnBlock(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        self.norm = nn.GroupNorm(32, channels)
+        self.q = nn.Conv2d(channels, channels, 1)
+        self.k = nn.Conv2d(channels, channels, 1)
+        self.v = nn.Conv2d(channels, channels, 1)
+        self.proj = nn.Conv2d(channels, channels, 1)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+        x_in = x
+        x = self.norm(x)
+
+        q = self.q(x).reshape(b, c, h*w).permute(0, 2, 1)   # (b, hw, c)
+        k = self.k(x).reshape(b, c, h*w)                    # (b, c, hw)
+        v = self.v(x).reshape(b, c, h*w).permute(0, 2, 1)   # (b, hw, c)
+
+        attn = (q @ k) * (c ** -0.5)                        # (b, hw, hw)
+        attn = attn.softmax(dim=-1)
+
+        out = attn @ v                                      # (b, hw, c)
+        out = out.permute(0, 2, 1).reshape(b, c, h, w)
+        out = self.proj(out)
+
+        return x_in + out
+
+
 class Encoder(nn.Module):
     def __init__(
         self, 
@@ -241,7 +271,8 @@ class Encoder(nn.Module):
         in_channels: int, 
         hidden_channels: int,
         latent_dim: int,
-        multiple = (1,2,4,8)
+        multiple = (1,2,4,8),
+        using_mid_attn = False
     ):
         super().__init__()
 
@@ -269,6 +300,10 @@ class Encoder(nn.Module):
             ResBlock(hidden_channels * 8, hidden_channels * 8),
         )
 
+        self.mid_block1 = ResBlock(hidden_channels * 8, hidden_channels * 8)
+        self.mid_attn   = AttnBlock(hidden_channels * 8) if using_mid_attn else nn.Identity()
+        self.mid_block2 = ResBlock(hidden_channels * 8, hidden_channels * 8)
+
         self.to_latent = nn.Sequential(
             nn.GroupNorm(32, hidden_channels * 8),
             nn.SiLU(inplace=True),
@@ -281,6 +316,8 @@ class Encoder(nn.Module):
         x2 = self.down1(x1)
         x3 = self.down2(x2)
         x4 = self.down3(x3)
+        x4 = self.mid_block2(self.mid_attn(self.mid_block1(x4)))
+
         f  = self.to_latent(x4)
 
         return f
@@ -292,10 +329,15 @@ class Decoder(nn.Module):
         in_channels: int, 
         hidden_channels: int, 
         latent_dim: int, 
-        multiple = (1,2,4,8)
+        multiple = (1,2,4,8),
+        using_mid_attn = False
     ):
         super().__init__()
         self.init_conv = nn.Conv2d(latent_dim, hidden_channels * 8, kernel_size=3, stride=1, padding=1)
+
+        self.mid_block1 = ResBlock(hidden_channels * 8, hidden_channels * 8)
+        self.mid_attn   = AttnBlock(hidden_channels * 8) if using_mid_attn else nn.Identity()
+        self.mid_block2 = ResBlock(hidden_channels * 8, hidden_channels * 8)
 
         self.down0 = nn.Sequential(
             ResBlock(hidden_channels * 8, hidden_channels * 8),
@@ -326,6 +368,8 @@ class Decoder(nn.Module):
 
     def forward(self, f):
         x4 = self.init_conv(f)
+        x4 = self.mid_block2(self.mid_attn(self.mid_block1(x4)))
+        
         x3 = self.down0(x4)
         x2 = self.down1(x3)
         x1 = self.down2(x2)
