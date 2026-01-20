@@ -254,10 +254,15 @@ class AttnBlock(nn.Module):
         k = self.k(x).reshape(b, c, h*w)                    # (b, c, hw)
         v = self.v(x).reshape(b, c, h*w).permute(0, 2, 1)   # (b, hw, c)
 
-        attn = (q @ k) * (c ** -0.5)                        # (b, hw, hw)
-        attn = attn.softmax(dim=-1)
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            q = q.float()
+            k = k.float()
+            attn = (q @ k) * (c ** -0.5)                        # (b, hw, hw)
+            attn = attn.softmax(dim=-1)
 
-        out = attn @ v                                      # (b, hw, c)
+            out = attn @ v.float()                              # (b, hw, c)
+        
+        out = out.to(x.dtype)
         out = out.permute(0, 2, 1).reshape(b, c, h, w)
         out = self.proj(out)
 
@@ -272,7 +277,7 @@ class Encoder(nn.Module):
         hidden_channels: int,
         latent_dim: int,
         multiple = (1,2,4,8),
-        using_mid_attn = False
+        using_mid_attn = True
     ):
         super().__init__()
 
@@ -330,7 +335,7 @@ class Decoder(nn.Module):
         hidden_channels: int, 
         latent_dim: int, 
         multiple = (1,2,4,8),
-        using_mid_attn = False
+        using_mid_attn = True
     ):
         super().__init__()
         self.init_conv = nn.Conv2d(latent_dim, hidden_channels * 8, kernel_size=3, stride=1, padding=1)
