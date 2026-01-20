@@ -9,8 +9,7 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
     - [x] Multi-Scale Quantizer
         - [x] *Develop Phi*
         - [x] *Normalize* 
-        - [ ] *Attention Layer in Encoder / Decoder*
-
+        - [x] *Attention Layer in Encoder / Decoder*
 - [x] **Motion Tokenizer**
 - [x] **World Model**
     - [x] Implement TENSFormer
@@ -43,9 +42,13 @@ trainer = SceneTokenizerTrainer(
     optimizer = torch.optim.AdamW(lr=1e-4,params=m.parameters()),
     train_ds = train_ds,
     valid_ds = valid_ds,
-    batch_size = 4,
-    device = 'cuda',
+    batch_size = 8,
+    device = 'cuda:0',
+    autocast_enabled = True,
+    autocast_dtype = torch.float16,
+    ignore_index = 255
 )
+
 
 trainer.train(num_epochs=100)
 
