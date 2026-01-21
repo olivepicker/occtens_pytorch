@@ -122,10 +122,7 @@ class MultiScaleVQVAE(nn.Module):
             f_hat = f_hat + f_p
             f_rest = f_rest - f_p
 
-            vq_loss_sum += (
-                F.mse_loss(f_hat.data, f) * (0.2 * self.beta)
-                + F.l1_loss(f_hat, f_no_grad)
-            )
+            vq_loss_sum += F.mse_loss(f_hat.data, f) * self.beta + F.mse_loss(f_hat, f_no_grad)
             stats[f"perplexity_s{s}"] = perplex_s.detach()
     
         f_hat = (f_hat.data - f_no_grad).add_(f)

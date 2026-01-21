@@ -5,6 +5,7 @@ import os
 import numpy as np
 
 from torch.utils.data import DataLoader, ConcatDataset
+from transformers import get_cosine_schedule_with_warmup
 from einops import rearrange
 from tqdm.auto import tqdm
 
@@ -16,7 +17,9 @@ class SceneTokenizerTrainer(nn.Module):
     def __init__(
         self, 
         model,
+        num_epochs,
         optimizer,
+        scheduler,
         train_ds,
         valid_ds,
         device='cuda',
@@ -42,6 +45,7 @@ class SceneTokenizerTrainer(nn.Module):
         self.model = model.to(device)
         self.optimizer = optimizer
         self.device = device
+        self.num_epoch = num_epoch
 
         self.save_token = save_token
         if self.save_token:
@@ -87,6 +91,14 @@ class SceneTokenizerTrainer(nn.Module):
         }
         self.scaler = torch.amp.GradScaler(enabled=autocast_enabled)
 
+        num_training_steps = num_epochs * len(self.train_dl)
+        num_warmup_steps = int(num_training_steps * 0.05)
+        self.scheduler = get_cosine_schedule_with_warmup(
+            optimizer = self.optimizer,
+            num_warmup_steps = num_warmup_steps,
+            num_training_steps = num_training_steps
+        )
+
         self.save_path = save_path
         if os.path.exists(self.save_path)==False:
             os.makedirs(self.save_path)
@@ -109,6 +121,9 @@ class SceneTokenizerTrainer(nn.Module):
         self.scaler.scale(total_loss).backward()
         self.scaler.step(self.optimizer)
         self.scaler.update()
+
+        if hasattr(self, 'scheduler') and self.scheduler is not None:
+            self.scheduler.step()
 
         return {
             "loss_total": total_loss.detach(),
@@ -134,8 +149,9 @@ class SceneTokenizerTrainer(nn.Module):
             "loss_total": total_loss.detach(),
         }
     
-    def train(self, num_epochs, log_interval=50, val_interval=1):
-        for epoch in range(num_epochs):
+    def train(self, log_interval=50, val_interval=1):
+        
+        for epoch in range(self.num_epochs):
             self.model.train()
             train_loss_sum = 0.0
             for step, batch in enumerate(self.train_dl):
