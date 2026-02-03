@@ -19,9 +19,9 @@ class SceneTokenizerTrainer(nn.Module):
         model,
         num_epochs,
         optimizer,
-        scheduler,
         train_ds,
         valid_ds,
+        use_scheduler=True,
         device='cuda',
         autocast_enabled=False,
         autocast_device_type='cuda',
@@ -45,7 +45,7 @@ class SceneTokenizerTrainer(nn.Module):
         self.model = model.to(device)
         self.optimizer = optimizer
         self.device = device
-        self.num_epoch = num_epoch
+        self.num_epochs = num_epochs
 
         self.save_token = save_token
         if self.save_token:
@@ -93,11 +93,12 @@ class SceneTokenizerTrainer(nn.Module):
 
         num_training_steps = num_epochs * len(self.train_dl)
         num_warmup_steps = int(num_training_steps * 0.05)
+
         self.scheduler = get_cosine_schedule_with_warmup(
             optimizer = self.optimizer,
             num_warmup_steps = num_warmup_steps,
             num_training_steps = num_training_steps
-        )
+        ) if use_scheduler else None
 
         self.save_path = save_path
         if os.path.exists(self.save_path)==False:
@@ -302,8 +303,8 @@ class OccTENSTrainer(nn.Module):
             "loss_total": loss.detach(),
         }
 
-    def train(self, num_epochs, log_interval=50, val_interval=1):
-        for epoch in range(num_epochs):
+    def train(self, log_interval=50, val_interval=1):
+        for epoch in range(self.num_epochs):
             train_loss_sum = 0.0
             for step, batch in enumerate(self.train_dl):
                 log = self.train_one_step(batch)
