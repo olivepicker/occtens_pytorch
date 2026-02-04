@@ -244,7 +244,18 @@ class AttnBlock(nn.Module):
         self.k = nn.Conv2d(channels, channels, 1)
         self.v = nn.Conv2d(channels, channels, 1)
         self.proj = nn.Conv2d(channels, channels, 1)
+        self.apply(self._init_weights)
 
+    def _init_weights(self, m):
+        if isinstance(m, nn.Conv2d):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        
+        nn.init.constant_(self.proj.weight, 0)
+        if self.proj.bias is not None:
+            nn.init.constant_(self.proj.bias, 0)
+            
     def forward(self, x):
         b, c, h, w = x.shape
         x_in = x
@@ -344,27 +355,26 @@ class Decoder(nn.Module):
         self.mid_attn   = AttnBlock(hidden_channels * 8) if using_mid_attn else nn.Identity()
         self.mid_block2 = ResBlock(hidden_channels * 8, hidden_channels * 8)
 
-        self.down0 = nn.Sequential(
+        self.up0 = nn.Sequential(
             ResBlock(hidden_channels * 8, hidden_channels * 8),
             ResBlock(hidden_channels * 8, hidden_channels * 8),
         )
-        
-        self.down1 = nn.Sequential(
+        self.up1 = nn.Sequential(
+            Upsample2x(hidden_channels * 8),
             ResBlock(hidden_channels * 8, hidden_channels * 4),
-            ResBlock(hidden_channels * 4, hidden_channels * 4),
-            Upsample2x(hidden_channels * 4)
+            ResBlock(hidden_channels * 4, hidden_channels * 4)
         )
-        self.down2 = nn.Sequential(
+        self.up2 = nn.Sequential(
+            Upsample2x(hidden_channels * 4),
             ResBlock(hidden_channels * 4, hidden_channels * 2),
-            ResBlock(hidden_channels * 2, hidden_channels * 2),
-            Upsample2x(hidden_channels * 2)
+            ResBlock(hidden_channels * 2, hidden_channels * 2)
         )
-
-        self.down3 = nn.Sequential(
+        self.up3 = nn.Sequential(
+            Upsample2x(hidden_channels * 2),
             ResBlock(hidden_channels * 2, hidden_channels * 1),
             ResBlock(hidden_channels * 1, hidden_channels * 1),
-            Upsample2x(hidden_channels * 1)
         )
+        
         self.to_latent = nn.Sequential(
             nn.GroupNorm(32, hidden_channels),
             nn.SiLU(inplace=True),
@@ -375,10 +385,10 @@ class Decoder(nn.Module):
         x4 = self.init_conv(f)
         x4 = self.mid_block2(self.mid_attn(self.mid_block1(x4)))
         
-        x3 = self.down0(x4)
-        x2 = self.down1(x3)
-        x1 = self.down2(x2)
-        x0 = self.down3(x1)
+        x3 = self.up0(x4)
+        x2 = self.up1(x3)
+        x1 = self.up2(x2)
+        x0 = self.up3(x1)
         f = self.to_latent(x0)
 
         return f
