@@ -5,44 +5,48 @@ import torch.nn.functional as F
 from einops import rearrange
 
 class VectorQuantizer(nn.Module):
-    def __init__(
-        self, 
-        num_codes: int, 
-        code_dim: int, 
-    ):
+    def __init__(self, num_codes: int, code_dim: int, using_znorm: bool = True, eps: float = 1e-10):
         super().__init__()
         self.num_codes = num_codes
         self.code_dim = code_dim
+        self.using_znorm = using_znorm
+        self.eps = eps
 
         self.codebook = nn.Embedding(num_codes, code_dim)
         nn.init.uniform_(self.codebook.weight, -1.0 / num_codes, 1.0 / num_codes)
+
+    @torch.no_grad()
+    def _nearest_indices(self, z: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = z.shape
+        z_flat = z.permute(0, 2, 3, 1).contiguous().view(-1, C)
+
+        if self.using_znorm:
+            z_flat = F.normalize(z_flat, dim=1)
+            cb = F.normalize(self.codebook.weight, dim=1)
+            sim = z_flat @ cb.t()
+            idx = torch.argmax(sim, dim=1)
+        else:
+            z_sq = (z_flat ** 2).sum(dim=1, keepdim=True)
+            e_sq = (self.codebook.weight ** 2).sum(dim=1)
+            dist = z_sq + e_sq.unsqueeze(0) - 2 * (z_flat @ self.codebook.weight.t())
+            idx = torch.argmin(dist, dim=1)
+
+        return idx
 
     def forward(self, z):
         B, C, H, W = z.shape
         assert C == self.code_dim, f"code_dim mismatch: {C} != {self.code_dim}"
 
-        # (B, C, H, W) -> (B*H*W, C)
-        z_perm = z.permute(0, 2, 3, 1).contiguous()  # (B, H, W, C)
-        z_flat = z_perm.view(-1, C)                  # (N, C), N = B*H*W
+        idx_N = self._nearest_indices(z.detach())
+        indices = idx_N.view(B, H, W)
 
-        z_norm = F.normalize(z_flat, dim=1)
-        codebook_norm = F.normalize(self.codebook.weight, dim=1)
+        z_q = self.codebook(indices).permute(0, 3, 1, 2).contiguous()  # (B,C,H,W)
 
-        sim = z_norm @ codebook_norm.t()
-        encoding_indices = torch.argmax(sim, dim=1)
-
-        z_q_flat = self.codebook(encoding_indices)
-        z_q = z_q_flat.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
-
-        z_q_st = z + (z_q - z).detach()
-
-        encodings_onehot = F.one_hot(encoding_indices, self.num_codes).float()  # (N, K)
-        avg_probs = encodings_onehot.mean(dim=0)  # (K,)
-        perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
-        indices = encoding_indices.view(B, H, W)
+        enc_onehot = F.one_hot(idx_N, self.num_codes).float()
+        avg_probs = enc_onehot.mean(dim=0)
+        perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + self.eps)))
 
         return z_q, indices, perplexity
-
 
 class Phi(nn.Conv2d):
     def __init__(self, dim, quant_residual=0.5):
@@ -51,7 +55,6 @@ class Phi(nn.Conv2d):
 
     def forward(self, h):
         return h * (1 - self.resi_ratio) + super().forward(h) * self.resi_ratio
-
 
 class MultiScaleVQVAE(nn.Module):
     def __init__(
@@ -145,8 +148,7 @@ class MultiScaleVQVAE(nn.Module):
 
         for idx, idx_s in enumerate(indices_list):
             z = self.vq.codebook(idx_s).permute(0,3,1,2)
-            if idx < len(self.scales)-1:
-                z = F.interpolate(z, size=(H_lat, W_lat), mode="bicubic").contiguous()
+            z = F.interpolate(z, size=(H_lat, W_lat), mode="bicubic").contiguous()
             f += self.phi[idx](z)
 
         logits = self.decoder(self.post_quant_conv(f))
@@ -164,7 +166,7 @@ class MultiScaleVQVAE(nn.Module):
         y = x.clone().long()
 
         # if mask is not None:
-        #     y.masked_fill_(~mask.bool(), 255) # Commented out masking for Channel 17 (free) due to training issues. 
+        #     y.masked_fill_(~mask.bool(), 255)
         
         x_one_hot = F.one_hot(x, num_classes=self.num_classes)
         x = rearrange(x_one_hot, 'b z y x c -> b (z c) y x').float()
