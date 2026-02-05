@@ -93,14 +93,15 @@ class MultiScaleVQVAE(nn.Module):
             latent_dim=latent_dim, 
         )
 
+        self.pre_quant_norm = nn.GroupNorm(32, latent_dim)
         self.pre_quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=3, stride=1, padding=3//2)
+        self.post_quant_norm = nn.GroupNorm(32, latent_dim)
         self.post_quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=3, stride=1, padding=3//2)
 
     def encode(self, x):
         stats = {}
 
-        f = self.pre_quant_conv(self.encoder(x))  # (B, D, H_lat, W_lat), latent space
-        
+        f = self.pre_quant_norm(self.pre_quant_conv(self.encoder(x)))  # (B, D, H_lat, W_lat), latent space
         f_no_grad = f.detach()
         f_rest = f_no_grad.clone()
         f_hat = torch.zeros_like(f_rest)
@@ -151,7 +152,7 @@ class MultiScaleVQVAE(nn.Module):
             z = F.interpolate(z, size=(H_lat, W_lat), mode="bicubic").contiguous()
             f += self.phi[idx](z)
 
-        logits = self.decoder(self.post_quant_conv(f))
+        logits = self.decoder(self.post_quant_norm(self.post_quant_conv(f)))
 
         if out_zyx:
             logits_3d = rearrange(logits, "b (z c) y x -> b c z y x", c=self.num_classes).contiguous()
@@ -290,7 +291,7 @@ class Encoder(nn.Module):
         hidden_channels: int,
         latent_dim: int,
         multiple = (1,2,4,8),
-        using_mid_attn = True
+        using_mid_attn = False
     ):
         super().__init__()
 
@@ -348,7 +349,7 @@ class Decoder(nn.Module):
         hidden_channels: int, 
         latent_dim: int, 
         multiple = (1,2,4,8),
-        using_mid_attn = True
+        using_mid_attn = False
     ):
         super().__init__()
         self.init_conv = nn.Conv2d(latent_dim, hidden_channels * 8, kernel_size=3, stride=1, padding=1)

@@ -26,7 +26,7 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
 
 ## Usage
 ```python
-# Train Scene Tokenizer
+# 1. Train Scene Tokenizer
 
 from networks.scene_tokenizer import MultiScaleVQVAE
 from trainer import SceneTokenizerTrainer
@@ -43,17 +43,17 @@ trainer = SceneTokenizerTrainer(
     train_ds = train_ds,
     valid_ds = valid_ds,
     batch_size = 8,
-    device = 'cuda:0',
-    autocast_enabled = True,
-    autocast_dtype = torch.float16,
+    device = 'cuda',
+    autocast_enabled = False,
     ignore_index = 255
 )
 
 
 trainer.train(num_epochs=100)
+```
 
-
-# Save token maps
+```python
+# 2. Save token maps
 ...
 
 trainer = SceneTokenizerTrainer(    
@@ -61,7 +61,7 @@ trainer = SceneTokenizerTrainer(
     optimizer = None,
     train_ds = train_ds, 
     valid_ds = valid_ds,
-    batch_size = 4,
+    batch_size = 8,
     device = 'cuda',
     save_token = True   # If True, valid_ds will be concatenated with train_ds to tokenize the entire dataset.
 )
@@ -70,7 +70,7 @@ trainer.save_token_all()
 ```
 
 ```python
-# Train OccTENS (Using Occ3D Nuscenes Dataset)
+# 3. Train OccTENS (Using Occ3D Nuscenes Dataset)
 
 from occtens_pytorch import OccTENS
 from trainer import OccTENSTrainer
