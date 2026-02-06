@@ -291,7 +291,7 @@ class Encoder(nn.Module):
         hidden_channels: int,
         latent_dim: int,
         multiple = (1,2,4,8),
-        using_mid_attn = False
+        using_mid_attn = True
     ):
         super().__init__()
 
@@ -349,7 +349,7 @@ class Decoder(nn.Module):
         hidden_channels: int, 
         latent_dim: int, 
         multiple = (1,2,4,8),
-        using_mid_attn = False
+        using_mid_attn = True
     ):
         super().__init__()
         self.init_conv = nn.Conv2d(latent_dim, hidden_channels * 8, kernel_size=3, stride=1, padding=1)

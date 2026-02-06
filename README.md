@@ -39,17 +39,17 @@ m = MultiScaleVQVAE(
 
 trainer = SceneTokenizerTrainer(
     model = m,
-    optimizer = torch.optim.AdamW(lr=1e-4,params=m.parameters()),
+    optimizer = torch.optim.AdamW(lr=5e-5,params=m.parameters()),
     train_ds = train_ds,
     valid_ds = valid_ds,
     batch_size = 8,
     device = 'cuda',
-    autocast_enabled = False,
+    autocast_enabled = True,    # Now autocast works!
     ignore_index = 255
 )
 
 
-trainer.train(num_epochs=100)
+trainer.train(num_epochs=50)
 ```
 
 ```python
