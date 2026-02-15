@@ -4,11 +4,13 @@ import torch.nn.functional as F
 
 from einops import rearrange, repeat
 
+
 class GEGLU(nn.Module):
     def forward(self, x):
         x, gate = x.chunk(2, dim = -1)
         return F.gelu(gate) * x
-    
+
+
 class Attention(nn.Module):
     def __init__(
         self, 
@@ -49,6 +51,7 @@ class Attention(nn.Module):
         
         return self.out(out)
 
+
 class FeedForward(nn.Module):
     def __init__(self, dim, mult):
         super().__init__()
@@ -63,6 +66,7 @@ class FeedForward(nn.Module):
         )
     def forward(self, x):
         return self.ff(x)
+
 
 class Decoder(nn.Module):
     def __init__(
@@ -100,6 +104,7 @@ class Decoder(nn.Module):
         tokens = torch.cat([bos, x], dim=1) 
         return self.norm(tokens)
 
+
 class TENSFormer(nn.Module):
     def __init__(
         self,
@@ -108,18 +113,23 @@ class TENSFormer(nn.Module):
         num_heads=8,
         num_layers=4,
         ff_mult=4,
+        num_tokens=2048,
+        num_frames=6
     ):
         super().__init__()
         self.bos_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.time_pos_emb = nn.Parameter(torch.randn(1, num_frames, 1, dim))
+        self.scale_pos_emb = nn.Parameter(torch.randn(1, 1, num_tokens, dim))
         self.decoder = Decoder(dim, dim_head, num_heads, ff_mult, num_layers)
 
     def forward(
         self, 
         scene_tokens, 
         motion_tokens, 
-        lengths, 
+        lengths,
         context=None
     ):
+        scene_tokens = scene_tokens + self.time_pos_emb + self.scale_pos_emb
         B, F = scene_tokens.shape[:2]
         device = scene_tokens.device
         ends = torch.cumsum(lengths, dim=0)

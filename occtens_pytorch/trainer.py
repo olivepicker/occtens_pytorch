@@ -210,7 +210,8 @@ class SceneTokenizerTrainer(nn.Module):
 
 class OccTENSTrainer(nn.Module):
     def __init__(
-        self, 
+        self,
+        num_epochs,
         model,
         optimizer,
         train_ds,
@@ -234,6 +235,7 @@ class OccTENSTrainer(nn.Module):
             ignore_index=ignore_index
         ).to(device)
 
+        self.num_epochs = num_epochs
         self.optimizer = optimizer
         self.device = device
 

@@ -9,6 +9,7 @@ from networks.motion_tokenizer import MotionTokenizer
 from networks.scene_tokenizer import MultiScaleVQVAE
 from networks.tensformer import TENSFormer
 
+
 class OccTENS(nn.Module):
     def __init__(
         self,
@@ -58,12 +59,14 @@ class OccTENS(nn.Module):
             xyt_n_bins = motion_xyt_n_bins
         )
 
+        num_tokens = np.sum([i*i for i in scene_scales])
         self.model = TENSFormer(
             dim = dim,
             dim_head = dim_head,
             num_heads = num_heads,
             num_layers = num_layers,
-            ff_mult = ff_mult
+            ff_mult = ff_mult,
+            num_tokens = num_tokens
         )
 
         self.dim = dim
