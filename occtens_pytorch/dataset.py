@@ -2,6 +2,8 @@ import os
 import torch
 import numpy as np
 import json
+import random
+import torch.nn.functional as F
 
 from torch.utils.data import Dataset, DataLoader
 from einops import rearrange
@@ -92,7 +94,7 @@ class VoxelAugmentor:
         
         affine_matrix = torch.tensor([
             [s * cos_t, s * -sin_t, 0, 0],
-            [s * sin_t, s * cos_t, 0, 0],
+            [s * sin_t, s * cos_t,  0, 0],
             [0,         0,          1, 0]
         ], dtype=torch.float32, device=voxel.device).unsqueeze(0)
 

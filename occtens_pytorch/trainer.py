@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import os
 import numpy as np
 
@@ -37,8 +36,8 @@ class SceneTokenizerTrainer(nn.Module):
         ignore_index=255,
         lambda_recon=1.0, 
         lambda_vq=1.0,
-        save_path = 'scene_output/',
-        save_token = False
+        save_path='scene_output/',
+        save_token=False
     ):
         super().__init__()
 
@@ -206,7 +205,7 @@ class SceneTokenizerTrainer(nn.Module):
                     scene_num = batch['scene_num'][b]
                     scene_id = batch['scene_id'][b]
                     np.save(os.path.join(token_save_path, f'{scene_num}_{scene_id}.npy'), tokens[b])
-                     
+
 
 class OccTENSTrainer(nn.Module):
     def __init__(
@@ -224,9 +223,9 @@ class OccTENSTrainer(nn.Module):
         num_workers=4,
         context_frame_point=4,
         ignore_index=-1,
-        beta_scene = 1.,
-        beta_motion = 1.,
-        save_path = 'occtens_output/'
+        beta_scene=1.,
+        beta_motion=1.,
+        save_path='occtens_output/'
     ):
         super().__init__()
         self.model = AutoRegressiveWrapper(
