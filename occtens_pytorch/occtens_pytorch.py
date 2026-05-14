@@ -17,6 +17,7 @@ class OccTENS(nn.Module):
         dim_head = 64,
         num_heads = 8,
         num_layers = 4,
+        num_frames = 10,
         ff_mult = 4,
         use_prepared_token_map = True,
         scene_in_channel = 16,
@@ -28,7 +29,8 @@ class OccTENS(nn.Module):
         motion_x_range = (-1, 1),
         motion_y_range = (-1, 1),
         motion_t_range = (-np.pi, np.pi),
-        motion_xyt_n_bins = (20, 20, 20)
+        motion_xyt_n_bins = (20, 20, 20),
+        ignore_index = -1
     ):
         super().__init__()
 
@@ -66,14 +68,21 @@ class OccTENS(nn.Module):
             num_heads = num_heads,
             num_layers = num_layers,
             ff_mult = ff_mult,
-            num_tokens = num_tokens
+            num_tokens = num_tokens,
+            num_frames = num_frames
         )
 
         self.dim = dim
+
+        self.scene_vocab_size = scene_num_codes
+        self.scene_token_embedding = nn.Embedding(self.scene_vocab_size, dim)
+        self.scene_mask_token_id = self.scene_vocab_size
+
         self.motion_vocab_size = np.prod(motion_xyt_n_bins)
-        self.vocab_size = scene_num_codes + self.motion_vocab_size
-        self.scene_token_embedding = nn.Embedding(self.vocab_size, dim)
-        self.motion_token_embedding = nn.Embedding(self.vocab_size, dim)
+        self.motion_token_embedding = nn.Embedding(self.motion_vocab_size, dim)
+        self.motion_mask_token_id = self.motion_vocab_size
+
+        self.ignore_index = ignore_index
         
     def forward(self, scene_token_ids, motions):
         device = scene_token_ids.device
@@ -90,10 +99,21 @@ class OccTENS(nn.Module):
 
         
         B, F, T = scene_token_ids.size()
-        scene_tokens = self.scene_token_embedding(scene_token_ids)
-        motion_ids = self.motion_tokenizer(motions)[:,:,None]
-        motion_tokens = self.motion_token_embedding(motion_ids)#[:,:,None,:]
+    
+        scene_input_ids = scene_token_ids.clone()
+        scene_unknown = scene_input_ids == self.ignore_index
+        scene_input_ids[scene_unknown] = self.scene_mask_token_id
 
+        scene_tokens = self.scene_token_embedding(scene_input_ids)
+
+        motion_unknown = (motions == self.ignore_index).any(dim=-1)  # (B, F)
+        safe_motions = motions.clone()
+        safe_motions[motion_unknown] = 0.0
+        motion_ids = self.motion_tokenizer(safe_motions)[:, :, None]  # (B, F, 1)
+        motion_ids = motion_ids.clone()
+        motion_ids[motion_unknown[:, :, None]] = self.motion_mask_token_id
+
+        motion_tokens = self.motion_token_embedding(motion_ids)
 
         scene_length = torch.tensor(
             [scene_token_ids.shape[2]],
@@ -119,6 +139,11 @@ class OccTENS(nn.Module):
         token_type = torch.zeros((B, F, token_length), device=device, dtype=torch.long)
         token_type[:, :, motion_length:] = 1
         
+        motion_target_ids = self.motion_tokenizer(safe_motions)[:, :, None]
+        motion_target_ids = motion_target_ids.clone()
+        motion_target_ids[motion_unknown[:, :, None]] = self.ignore_index
+
+
         out = {
             'full_embedding': embedding,
             'token_embedding': token_emb,
@@ -185,64 +210,139 @@ class AutoRegressiveWrapper(nn.Module):
         return out
 
     @torch.no_grad()
-    def generate(self, scene_token_ids, motions, max_steps=None, temperature=1.0, top_k=None):
+    def generate(
+        self,
+        past_scene_tokens,
+        past_motions,
+        total_frames,
+        context_point=None,
+        future_motions=None,
+        max_steps=None,
+        temperature=1.0,
+        top_k=None,
+    ):
         self.model.eval()
-        B, F, T = scene_token_ids.shape
-        device = scene_token_ids.device
+
+        if context_point is None:
+            context_point = past_scene_tokens.size(1)
+
+        B, C, T_scene = past_scene_tokens.shape
+        _, C_m, motion_dim = past_motions.shape
+
+        assert C == C_m
+        assert motion_dim == 3
+
+        device = past_scene_tokens.device
+
+        scene_tokens = torch.full(
+            (B, total_frames, T_scene),
+            fill_value=self.ignore_index,
+            device=device,
+            dtype=torch.long,
+        )
+        scene_tokens[:, :context_point, :] = past_scene_tokens
+
+        motion_tokens = torch.full(
+            (B, total_frames, 3),
+            fill_value=self.ignore_index,
+            device=device,
+            dtype=torch.long,
+        )
+        motion_tokens[:, :context_point, :] = past_motions
+
+        if future_motions is not None:
+            motion_tokens[:, context_point:, :] = future_motions
+            generate_motion = False
+        else:
+            generate_motion = True
+
+        return self.generate_joint(
+            scene_token_ids=scene_tokens,
+            motions=motion_tokens,
+            context_point=context_point,
+            generate_motion=generate_motion,
+            max_steps=max_steps,
+            temperature=temperature,
+            top_k=top_k,
+        )
+    
+
+    @torch.no_grad()
+    def generate_joint(
+        self,
+        scene_token_ids,
+        motions,
+        context_point,
+        generate_motion=True,
+        max_steps=None,
+        temperature=1.0,
+        top_k=None,
+    ):
+        B, F_total, T_scene = scene_token_ids.shape
+        T_frame = T_scene + 1
 
         scene_tokens = scene_token_ids.clone()
         motion_tokens = motions.clone()
 
         out = self.model(scene_token_ids=scene_tokens, motions=motion_tokens)
 
-        full_emb = out['full_embedding']
-        L = full_emb.size(1) - 1
+        token_ids = rearrange(out["token_ids"], "b f t -> b (f t)")
+        frame_idx = rearrange(out["frame_idx"], "b f t -> b (f t)")
+        token_type = rearrange(out["token_type"], "b f t -> b (f t)")
 
-        token_ids  = rearrange(out['token_ids'],  'b f t -> b (f t)')     # (B, L)
-        frame_idx  = rearrange(out['frame_idx'],  'b f t -> b (f t)')     # (B, L)
-        token_type = rearrange(out['token_type'], 'b f t -> b (f t)')     # (B, L)
-
-        is_future = frame_idx >= self.context_point
+        is_future = frame_idx >= context_point
         is_motion = token_type == 0
-        is_scene  = token_type == 1
+        is_scene = token_type == 1
 
-        to_fill = is_future & (token_ids == self.ignore_index)
+        if generate_motion:
+            to_fill = is_future & (token_ids == self.ignore_index)
+        else:
+            to_fill = is_future & is_scene & (token_ids == self.ignore_index)
 
         b_idx, l_idx = torch.nonzero(to_fill, as_tuple=True)
-        num_positions = b_idx.numel()
 
         if max_steps is not None:
-            num_positions = min(num_positions, max_steps)
+            n_steps = min(b_idx.numel(), max_steps)
+        else:
+            n_steps = b_idx.numel()
 
-        for step in range(num_positions):
+        for step in range(n_steps):
             b = b_idx[step]
             l = l_idx[step]
 
             out = self.model(scene_token_ids=scene_tokens, motions=motion_tokens)
-            x   = out['full_embedding'][:, :-1, :]
+            x = out["full_embedding"][:, :-1, :]
             logits = self.lm_head(x)
 
             logit_bl = logits[b, l] / temperature
 
             if top_k is not None:
-                values, indices = torch.topk(logit_bl, top_k)
-                probs = F.softmax(values, dim=-1)
-                next_token = indices[torch.multinomial(probs, 1)]
+                k = min(top_k, logit_bl.size(-1))
+                values, indices = torch.topk(logit_bl, k)
+                probs = torch.softmax(values, dim=-1)
+                sample_idx = torch.multinomial(probs, 1).item()
+                next_token = indices[sample_idx]
             else:
                 next_token = logit_bl.argmax(dim=-1)
 
             next_token = next_token.long()
 
-            if is_motion[b, l]:
-                f = (l // T).item()
-                t = (l %  T).item()
-                motion_tokens[b, f, t] = next_token
-            elif is_scene[b, l]:
-                f = (l // T).item()
-                t = (l %  T).item()
-                scene_tokens[b, f, t] = next_token
+            f = (l // T_frame).item()
+            local_idx = (l % T_frame).item()
+
+            if local_idx == 0:
+                if not generate_motion:
+                    continue
+
+                motion_components = self.motion_tokenizer.decode_token(next_token)
+                motion_tokens[b, f, :] = motion_components.to(
+                    device=motion_tokens.device,
+                    dtype=motion_tokens.dtype,
+                )
+
             else:
-                continue
+                scene_t = local_idx - 1
+                scene_tokens[b, f, scene_t] = next_token
 
         return {
             "scene_token_ids": scene_tokens,
