@@ -75,11 +75,11 @@ class OccTENS(nn.Module):
         self.dim = dim
 
         self.scene_vocab_size = scene_num_codes
-        self.scene_token_embedding = nn.Embedding(self.scene_vocab_size, dim)
+        self.scene_token_embedding = nn.Embedding(self.scene_vocab_size + 1, dim)
         self.scene_mask_token_id = self.scene_vocab_size
 
         self.motion_vocab_size = np.prod(motion_xyt_n_bins)
-        self.motion_token_embedding = nn.Embedding(self.motion_vocab_size, dim)
+        self.motion_token_embedding = nn.Embedding(self.motion_vocab_size + 1, dim)
         self.motion_mask_token_id = self.motion_vocab_size
 
         self.ignore_index = ignore_index
@@ -165,49 +165,80 @@ class AutoRegressiveWrapper(nn.Module):
         ignore_index=-1,
     ):
         super().__init__()
+
         self.model = model
         self.dim = self.model.dim
-        self.vocab_size = self.model.vocab_size
+        self.motion_vocab_size = self.model.motion_vocab_size
+        self.scene_vocab_size = self.model.scene_vocab_size
+        
         self.ignore_index = ignore_index
-
-        self.lm_head = nn.Linear(self.dim, self.vocab_size)
         self.context_point = context_frame_point
+
+        self.scene_lm_head = nn.Linear(self.dim, self.scene_vocab_size)
+        self.motion_lm_head = nn.Linear(self.dim, self.motion_vocab_size)
 
     def forward(self, scene_token_ids, motions):
         out = self.model(scene_token_ids=scene_token_ids, motions=motions)
-        x = out['full_embedding'][:,:-1,:]
 
-        token_ids, frame_idx, token_type = \
-            map(lambda t:rearrange(t, 'b f t -> b (f t)'), (out['token_ids'], out['frame_idx'], out['token_type']))
+        x = out["full_embedding"][:, :-1, :]
 
-        assert torch.max(frame_idx) >= self.context_point, 'context_point must be lower than num frames.'
-        
-        is_future = frame_idx >= self.context_point
-        is_motion = token_type == 0
-        is_scene  = token_type == 1
-
-        scene_mask = is_future & is_scene
-        motion_mask = is_future & is_motion
-
-        logits = self.lm_head(x)
-
-        losses = F.cross_entropy(
-            input = rearrange(logits, 'b t d -> (b t) d'),
-            target = rearrange(token_ids, 'b ft -> (b ft)'),
-            reduction = 'none',
-            ignore_index = self.ignore_index
+        token_ids, frame_idx, token_type = map(
+            lambda t: rearrange(t, "b f t -> b (f t)"),
+            (out["token_ids"], out["frame_idx"], out["token_type"]),
         )
 
-        scene_loss = losses[rearrange(scene_mask, 'b d -> (b d)')].mean()
-        motion_loss = losses[rearrange(motion_mask, 'b d -> (b d)')].mean()
+        if x.size(1) != token_ids.size(1):
+            raise RuntimeError(
+                f"x/token_ids length mismatch: x={x.size(1)}, token_ids={token_ids.size(1)}"
+            )
 
-        out = {
-            'losses': losses,
-            'scene_loss': scene_loss,
-            'motion_loss': motion_loss
+        assert torch.max(frame_idx) >= self.context_point, (
+            "context_point must be lower than num frames."
+        )
+
+        is_future = frame_idx >= self.context_point
+        is_motion = token_type == 0
+        is_scene = token_type == 1
+        is_valid = token_ids != self.ignore_index
+
+        scene_mask = is_future & is_scene & is_valid
+        motion_mask = is_future & is_motion & is_valid
+
+        if scene_mask.any():
+            scene_x = x[scene_mask]              # (N_scene, D)
+            scene_target = token_ids[scene_mask] # (N_scene,)
+
+            scene_logits = self.scene_lm_head(scene_x)
+
+            scene_loss = F.cross_entropy(
+                scene_logits,
+                scene_target,
+                reduction="mean",
+            )
+        else:
+            scene_loss = x.sum() * 0.0
+
+        if motion_mask.any():
+            motion_x = x[motion_mask]              # (N_motion, D)
+            motion_target = token_ids[motion_mask] # (N_motion,)
+
+            motion_logits = self.motion_lm_head(motion_x)
+
+            motion_loss = F.cross_entropy(
+                motion_logits,
+                motion_target,
+                reduction="mean",
+            )
+        else:
+            motion_loss = x.sum() * 0.0
+
+        loss = scene_loss + motion_loss
+
+        return {
+            "loss": loss,
+            "scene_loss": scene_loss,
+            "motion_loss": motion_loss,
         }
-
-        return out
 
     @torch.no_grad()
     def generate(
@@ -244,9 +275,9 @@ class AutoRegressiveWrapper(nn.Module):
 
         motion_tokens = torch.full(
             (B, total_frames, 3),
-            fill_value=self.ignore_index,
+            fill_value=float(self.ignore_index),
             device=device,
-            dtype=torch.long,
+            dtype=past_motions.dtype,
         )
         motion_tokens[:, :context_point, :] = past_motions
 
@@ -278,6 +309,13 @@ class AutoRegressiveWrapper(nn.Module):
         temperature=1.0,
         top_k=None,
     ):
+        self.model.eval()
+
+        if temperature <= 0:
+            raise ValueError("temperature must be > 0")
+        if top_k is not None and top_k <= 0:
+            raise ValueError("top_k must be positive")
+
         B, F_total, T_scene = scene_token_ids.shape
         T_frame = T_scene + 1
 
@@ -312,20 +350,8 @@ class AutoRegressiveWrapper(nn.Module):
 
             out = self.model(scene_token_ids=scene_tokens, motions=motion_tokens)
             x = out["full_embedding"][:, :-1, :]
-            logits = self.lm_head(x)
 
-            logit_bl = logits[b, l] / temperature
-
-            if top_k is not None:
-                k = min(top_k, logit_bl.size(-1))
-                values, indices = torch.topk(logit_bl, k)
-                probs = torch.softmax(values, dim=-1)
-                sample_idx = torch.multinomial(probs, 1).item()
-                next_token = indices[sample_idx]
-            else:
-                next_token = logit_bl.argmax(dim=-1)
-
-            next_token = next_token.long()
+            h = x[b, l] / temperature  # (D,)
 
             f = (l // T_frame).item()
             local_idx = (l % T_frame).item()
@@ -334,7 +360,24 @@ class AutoRegressiveWrapper(nn.Module):
                 if not generate_motion:
                     continue
 
-                motion_components = self.motion_tokenizer.decode_token(next_token)
+                logits = self.motion_lm_head(h)
+
+                if top_k is not None:
+                    k = min(top_k, logits.size(-1))
+                    values, indices = torch.topk(logits, k)
+                    probs = torch.softmax(values, dim=-1)
+                    sample_idx = torch.multinomial(probs, 1).item()
+                    next_token = indices[sample_idx]
+                else:
+                    next_token = logits.argmax(dim=-1)
+
+                next_token = next_token.long()
+
+                motion_components = self.model.motion_tokenizer.decode_token(
+                    next_token,
+                    return_continuous=True,
+                )
+
                 motion_tokens[b, f, :] = motion_components.to(
                     device=motion_tokens.device,
                     dtype=motion_tokens.dtype,
@@ -342,6 +385,20 @@ class AutoRegressiveWrapper(nn.Module):
 
             else:
                 scene_t = local_idx - 1
+
+                logits = self.scene_lm_head(h)
+
+                if top_k is not None:
+                    k = min(top_k, logits.size(-1))
+                    values, indices = torch.topk(logits, k)
+                    probs = torch.softmax(values, dim=-1)
+                    sample_idx = torch.multinomial(probs, 1).item()
+                    next_token = indices[sample_idx]
+                else:
+                    next_token = logits.argmax(dim=-1)
+
+                next_token = next_token.long()
+
                 scene_tokens[b, f, scene_t] = next_token
 
         return {
