@@ -14,7 +14,11 @@ class MotionTokenizer:
         self.x_q = UniformMotionQuantizer(x_range[0], x_range[1], self.n_x)
         self.y_q = UniformMotionQuantizer(y_range[0], y_range[1], self.n_y)
         self.t_q = UniformMotionQuantizer(t_range[0], t_range[1], self.n_t)
-    
+
+    @property
+    def vocab_size(self):
+        return self.n_x * self.n_y * self.n_t
+        
     def __call__(self, xyt):
         x, y, t = xyt[:,:,0], xyt[:,:,1], xyt[:,:,2]
         token = self.cartesian_product(x, y, t)

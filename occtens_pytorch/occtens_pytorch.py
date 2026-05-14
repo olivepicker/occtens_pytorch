@@ -74,6 +74,9 @@ class OccTENS(nn.Module):
 
         self.dim = dim
 
+        self.scene_scales = scene_scales
+        self.scene_scale_lengths = [s * s for s in scene_scales]
+
         self.scene_vocab_size = scene_num_codes
         self.scene_token_embedding = nn.Embedding(self.scene_vocab_size + 1, dim)
         self.scene_mask_token_id = self.scene_vocab_size
@@ -114,19 +117,24 @@ class OccTENS(nn.Module):
         motion_ids[motion_unknown[:, :, None]] = self.motion_mask_token_id
 
         motion_tokens = self.motion_token_embedding(motion_ids)
+        motion_length = motion_tokens.shape[2]
 
-        scene_length = torch.tensor(
-            [scene_token_ids.shape[2]],
+        scene_scale_lengths = torch.tensor(
+            self.scene_scale_lengths,
             device=device,
-            dtype=torch.long
+            dtype=torch.long,
         )
 
-        motion_length = motion_tokens.shape[2]
+        if int(scene_scale_lengths.sum().item()) != scene_token_ids.shape[2]:
+            raise ValueError(
+                f"sum(scene_scale_lengths)={scene_scale_lengths.sum().item()} "
+                f"must equal T_scene={scene_token_ids.shape[2]}"
+            )
 
         lengths = torch.cat([
             torch.tensor([motion_length], device=device, dtype=torch.long),
-            scene_length
-        ], dim=0) 
+            scene_scale_lengths,
+        ], dim=0)
 
         embedding = self.model(
             scene_tokens = scene_tokens,
@@ -170,6 +178,7 @@ class AutoRegressiveWrapper(nn.Module):
         self.dim = self.model.dim
         self.motion_vocab_size = self.model.motion_vocab_size
         self.scene_vocab_size = self.model.scene_vocab_size
+        self.scale_lengths = self.model.scene_scale_lengths
         
         self.ignore_index = ignore_index
         self.context_point = context_frame_point
@@ -297,7 +306,6 @@ class AutoRegressiveWrapper(nn.Module):
             top_k=top_k,
         )
     
-
     @torch.no_grad()
     def generate_joint(
         self,
@@ -305,6 +313,7 @@ class AutoRegressiveWrapper(nn.Module):
         motions,
         context_point,
         generate_motion=True,
+        scale_lengths=None,
         max_steps=None,
         temperature=1.0,
         top_k=None,
@@ -319,87 +328,102 @@ class AutoRegressiveWrapper(nn.Module):
         B, F_total, T_scene = scene_token_ids.shape
         T_frame = T_scene + 1
 
+        if scale_lengths is None:
+            scale_lengths = self.scale_lengths
+
+        if sum(scale_lengths) != T_scene:
+            raise ValueError(
+                f"sum(scale_lengths) must equal T_scene. "
+                f"got sum(scale_lengths)={sum(scale_lengths)}, T_scene={T_scene}"
+            )
+
         scene_tokens = scene_token_ids.clone()
         motion_tokens = motions.clone()
 
-        out = self.model(scene_token_ids=scene_tokens, motions=motion_tokens)
+        def sample_logits(logits):
+            logits = logits / temperature
 
-        token_ids = rearrange(out["token_ids"], "b f t -> b (f t)")
-        frame_idx = rearrange(out["frame_idx"], "b f t -> b (f t)")
-        token_type = rearrange(out["token_type"], "b f t -> b (f t)")
+            if top_k is not None:
+                k = min(top_k, logits.size(-1))
+                values, indices = torch.topk(logits, k, dim=-1)
+                probs = torch.softmax(values, dim=-1)
 
-        is_future = frame_idx >= context_point
-        is_motion = token_type == 0
-        is_scene = token_type == 1
+                flat_probs = probs.reshape(-1, k)
+                sample_idx = torch.multinomial(flat_probs, 1)
 
-        if generate_motion:
-            to_fill = is_future & (token_ids == self.ignore_index)
-        else:
-            to_fill = is_future & is_scene & (token_ids == self.ignore_index)
+                sample_idx = sample_idx.reshape(*logits.shape[:-1], 1)
+                next_tokens = torch.gather(indices, -1, sample_idx).squeeze(-1)
+                return next_tokens.long()
 
-        b_idx, l_idx = torch.nonzero(to_fill, as_tuple=True)
+            return logits.argmax(dim=-1).long()
 
-        if max_steps is not None:
-            n_steps = min(b_idx.numel(), max_steps)
-        else:
-            n_steps = b_idx.numel()
+        generated_steps = 0
 
-        for step in range(n_steps):
-            b = b_idx[step]
-            l = l_idx[step]
+        for f in range(context_point, F_total):
+            if generate_motion:
+                if max_steps is not None and generated_steps >= max_steps:
+                    break
 
-            out = self.model(scene_token_ids=scene_tokens, motions=motion_tokens)
-            x = out["full_embedding"][:, :-1, :]
+                motion_is_unknown = (motion_tokens[:, f, :] == self.ignore_index).any(dim=-1)
 
-            h = x[b, l] / temperature  # (D,)
+                if motion_is_unknown.any():
+                    out = self.model(
+                        scene_token_ids=scene_tokens,
+                        motions=motion_tokens,
+                    )
+                    x = out["full_embedding"][:, :-1, :]
 
-            f = (l // T_frame).item()
-            local_idx = (l % T_frame).item()
+                    l_motion = f * T_frame  # local_idx == 0
+                    h = x[motion_is_unknown, l_motion, :]  # (B_active, D)
 
-            if local_idx == 0:
-                if not generate_motion:
+                    logits = self.motion_lm_head(h)  # (B_active, motion_vocab)
+                    next_motion_tokens = sample_logits(logits)  # (B_active,)
+
+                    motion_components = self.model.motion_tokenizer.decode_token(
+                        next_motion_tokens,
+                        return_continuous=True,
+                    )
+
+                    motion_tokens[motion_is_unknown, f, :] = motion_components.to(
+                        device=motion_tokens.device,
+                        dtype=motion_tokens.dtype,
+                    )
+
+                    generated_steps += 1
+
+            start = 0
+
+            for scale_len in scale_lengths:
+                if max_steps is not None and generated_steps >= max_steps:
+                    break
+
+                end = start + scale_len
+                scale_unknown = scene_tokens[:, f, start:end] == self.ignore_index  # (B, scale_len)
+
+                if not scale_unknown.any():
+                    start = end
                     continue
 
-                logits = self.motion_lm_head(h)
-
-                if top_k is not None:
-                    k = min(top_k, logits.size(-1))
-                    values, indices = torch.topk(logits, k)
-                    probs = torch.softmax(values, dim=-1)
-                    sample_idx = torch.multinomial(probs, 1).item()
-                    next_token = indices[sample_idx]
-                else:
-                    next_token = logits.argmax(dim=-1)
-
-                next_token = next_token.long()
-
-                motion_components = self.model.motion_tokenizer.decode_token(
-                    next_token,
-                    return_continuous=True,
+                out = self.model(
+                    scene_token_ids=scene_tokens,
+                    motions=motion_tokens,
                 )
+                x = out["full_embedding"][:, :-1, :]
 
-                motion_tokens[b, f, :] = motion_components.to(
-                    device=motion_tokens.device,
-                    dtype=motion_tokens.dtype,
-                )
+                l_start = f * T_frame + 1 + start
+                l_end = f * T_frame + 1 + end
 
-            else:
-                scene_t = local_idx - 1
+                h = x[:, l_start:l_end, :]  # (B, scale_len, D)
 
-                logits = self.scene_lm_head(h)
+                logits = self.scene_lm_head(h)  # (B, scale_len, scene_vocab)
+                next_scene_tokens = sample_logits(logits)  # (B, scale_len)
 
-                if top_k is not None:
-                    k = min(top_k, logits.size(-1))
-                    values, indices = torch.topk(logits, k)
-                    probs = torch.softmax(values, dim=-1)
-                    sample_idx = torch.multinomial(probs, 1).item()
-                    next_token = indices[sample_idx]
-                else:
-                    next_token = logits.argmax(dim=-1)
+                current = scene_tokens[:, f, start:end]
+                current[scale_unknown] = next_scene_tokens[scale_unknown]
+                scene_tokens[:, f, start:end] = current
 
-                next_token = next_token.long()
-
-                scene_tokens[b, f, scene_t] = next_token
+                generated_steps += 1
+                start = end
 
         return {
             "scene_token_ids": scene_tokens,

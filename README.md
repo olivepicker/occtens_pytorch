@@ -22,6 +22,7 @@ Unofficial implementation proposed [OccTENS: 3D Occupancy World Model via Tempor
     - [x] Implement Losses
     - [x] Train base model
     - [x] Generate
+    - [x] Scale-wise generation
     - [ ] Validate forecasting performance
 
 ## Usage
@@ -58,7 +59,6 @@ trainer = SceneTokenizerTrainer(
     device = 'cuda',
     autocast_enabled = True,    # Now autocast works!
     ignore_index = 255,
-    scales = (1,5,10,15,20,25)
 )
 
 
