@@ -168,8 +168,8 @@ class MultiScaleVQVAE(nn.Module):
 
         # if mask is not None:
         #     y.masked_fill_(~mask.bool(), 255)
-        
-        x_one_hot = F.one_hot(x, num_classes=self.num_classes)
+
+        x_one_hot = F.one_hot(x.long(), num_classes=self.num_classes)
         x = rearrange(x_one_hot, 'b z y x c -> b (z c) y x').float()
 
         f_hat, indices_list, stats, vq_loss_sum = self.encode(x)
@@ -213,7 +213,7 @@ class ResBlock(nn.Module):
         super().__init__()
 
         if out_channels == None:
-            out_chanenls = in_channels
+            out_channels = in_channels
 
         if out_channels != in_channels:
             self.shortcut_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)

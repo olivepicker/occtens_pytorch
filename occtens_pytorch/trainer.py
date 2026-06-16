@@ -215,7 +215,9 @@ class OccTENSTrainer(nn.Module):
         optimizer,
         train_ds,
         valid_ds,
+        lr=1e-4,
         device='cuda',
+        use_reduced_scale=False,
         autocast_enabled=False,
         autocast_device_type='cuda',
         autocast_dtype=torch.float16,
@@ -231,11 +233,12 @@ class OccTENSTrainer(nn.Module):
         self.model = AutoRegressiveWrapper(
             model, 
             context_frame_point=context_frame_point,
-            ignore_index=ignore_index
+            ignore_index=ignore_index,
+            use_reduced_scale=use_reduced_scale
         ).to(device)
 
         self.num_epochs = num_epochs
-        self.optimizer = optimizer
+        self.optimizer = optimizer(lr=lr, params=self.model.parameters())
         self.device = device
 
         self.train_ds = train_ds
@@ -289,49 +292,87 @@ class OccTENSTrainer(nn.Module):
         self.scaler.update()
 
         return {
+            "scene_loss": out["scene_loss"].detach(),
+            "motion_loss": out["motion_loss"].detach(),
             "loss_total": loss.detach(),
         }
 
     def valid_one_step(self, batch):
         self.model.eval()
         with torch.autocast(**self.autocast_config):
-            scene_token_ids = batch['scene_token'].to(self.device)
-            motions = batch['motion'].to(self.device)
+            scene_token_ids = batch["scene_token"].to(self.device)
+            motions = batch["motion"].to(self.device)
             out = self.model(scene_token_ids=scene_token_ids, motions=motions)
-            loss = out['scene_loss'] * self.beta_scene + out['motion_loss'] * self.beta_motion
+            loss = out["scene_loss"] * self.beta_scene + out["motion_loss"] * self.beta_motion
 
         return {
+            "scene_loss": out["scene_loss"].detach(),
+            "motion_loss": out["motion_loss"].detach(),
             "loss_total": loss.detach(),
         }
 
     def train(self, log_interval=50, val_interval=1):
         for epoch in range(self.num_epochs):
             train_loss_sum = 0.0
+            train_scene_sum = 0.0
+            train_motion_sum = 0.0
+
             for step, batch in enumerate(self.train_dl):
                 log = self.train_one_step(batch)
+
                 train_loss_sum += log["loss_total"].item()
+                train_scene_sum += log["scene_loss"].item()
+                train_motion_sum += log["motion_loss"].item()
 
                 if (step + 1) % log_interval == 0:
-                    avg = train_loss_sum / (step + 1)
-                    print(f"[Epoch {epoch+1} | Step {step+1}] "
-                          f"train_loss={avg:.4f}")
+                    n = step + 1
+                    avg_total = train_loss_sum / n
+                    avg_scene = train_scene_sum / n
+                    avg_motion = train_motion_sum / n
+
+                    print(
+                        f"[Epoch {epoch+1} | Step {step+1}] "
+                        f"train_loss={avg_total:.4f} | "
+                        f"scene_loss={avg_scene:.4f} | "
+                        f"motion_loss={avg_motion:.4f}"
+                    )
 
             if (epoch + 1) % val_interval == 0:
                 self.model.eval()
+
                 val_loss_sum = 0.0
+                val_scene_sum = 0.0
+                val_motion_sum = 0.0
+
                 with torch.no_grad():
                     for batch in self.valid_dl:
                         log = self.valid_one_step(batch)
+
                         val_loss_sum += log["loss_total"].item()
-                val_avg = val_loss_sum / max(1, len(self.valid_dl))
-                print(f"[Epoch {epoch+1}] val_loss={val_avg:.4f}")
+                        val_scene_sum += log["scene_loss"].item()
+                        val_motion_sum += log["motion_loss"].item()
+
+                n_val = max(1, len(self.valid_dl))
+                val_avg = val_loss_sum / n_val
+                val_scene_avg = val_scene_sum / n_val
+                val_motion_avg = val_motion_sum / n_val
+
+                print(
+                    f"[Epoch {epoch+1}] "
+                    f"val_loss={val_avg:.4f} | "
+                    f"scene_loss={val_scene_avg:.4f} | "
+                    f"motion_loss={val_motion_avg:.4f}"
+                )
 
                 if val_avg < self.best_val_loss:
-                    print(f"Validation loss improved from {self.best_val_loss:.4f} to {val_avg:.4f}. Saving best model...")
+                    print(
+                        f"Validation loss improved from {self.best_val_loss:.4f} "
+                        f"to {val_avg:.4f}. Saving best model..."
+                    )
                     self.best_val_loss = val_avg
-                    
+
                     save_path = os.path.join(self.save_path, "best_model.pth")
-                    torch.save(self.model.model.state_dict(), save_path)
-                
+                    torch.save(self.model.state_dict(), save_path)
+
                 last_path = os.path.join(self.save_path, "last_model.pth")
-                torch.save(self.model.model.state_dict(), last_path)
+                torch.save(self.model.state_dict(), last_path)

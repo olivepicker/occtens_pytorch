@@ -72,8 +72,8 @@ class Decoder(nn.Module):
     def __init__(
         self,
         dim,
-        dim_head=64,
-        num_heads=8,
+        dim_head=32,
+        num_heads=4,
         ff_mult=4,
         num_layers=4
     ):
@@ -83,34 +83,81 @@ class Decoder(nn.Module):
 
         for _ in range(num_layers):
             self.layers.append(nn.ModuleList([
-            Attention(dim=dim, dim_head=dim_head, num_heads=num_heads),
-            Attention(dim=dim, dim_head=dim_head, num_heads=num_heads),
-            FeedForward(dim=dim, mult=ff_mult)
-        ]))
-        
-    def forward(self, tokens, num_frames, attn_mask_temporal, attn_mask_spatial, context=None):
+                Attention(dim=dim, dim_head=dim_head, num_heads=num_heads),
+                Attention(dim=dim, dim_head=dim_head, num_heads=num_heads),
+                FeedForward(dim=dim, mult=ff_mult)
+            ]))
+
+    def forward(self, tokens, num_frames, lengths, attn_mask_spatial=None, context=None):
         bos, x = tokens[:, :1, :], tokens[:, 1:, :]
- 
+
+        B = x.shape[0]
+        device = x.device
+
+        if not torch.is_tensor(lengths):
+            lengths = torch.tensor(lengths, device=device, dtype=torch.long)
+        else:
+            lengths = lengths.to(device=device, dtype=torch.long)
+
+        N = int(lengths.sum().item())
+
+        if x.size(1) != num_frames * N:
+            raise RuntimeError(
+                f"x length mismatch: x.size(1)={x.size(1)}, "
+                f"num_frames * N={num_frames * N}"
+            )
+
+        time_idx = torch.arange(num_frames, device=device)
+        attn_mask_time = time_idx[:, None] >= time_idx[None, :]
+
+        ends = torch.cumsum(lengths, dim=0)
+        starts = torch.cat(
+            [torch.zeros(1, device=device, dtype=torch.long), ends[:-1]],
+            dim=0
+        )
+
         for temporal_attn, spatial_attn, ff in self.layers:
-            x = x + temporal_attn(x, attn_mask=attn_mask_temporal)
-            x = rearrange(x, 'b (f t) d -> b f t d', f=num_frames)
+            x_4d = rearrange(x, 'b (f t) d -> b f t d', f=num_frames, t=N)
+            temporal_out = torch.zeros_like(x_4d)
 
-            x_frame = rearrange(x, 'b f t d -> (b f) t d', f=num_frames)
-            x_frame = x_frame + spatial_attn(x_frame, attn_mask=attn_mask_spatial)
-            x = rearrange(x_frame, '(b f) t d -> b (f t) d', f=num_frames)
+            for start, end in zip(starts.tolist(), ends.tolist()):
+                x_s = x_4d[:, :, start:end, :]  # (B, F, L, D)
+                L = end - start
 
+                x_s = rearrange(x_s, 'b f l d -> (b l) f d')
+                y_s = temporal_attn(
+                    x_s,
+                    attn_mask=attn_mask_time
+                )  # (B*L, F, D)
+
+                y_s = rearrange(y_s, '(b l) f d -> b f l d', b=B, l=L)
+
+                temporal_out[:, :, start:end, :] = y_s
+
+            x_4d = x_4d + temporal_out
+            x_frame = rearrange(x_4d, 'b f t d -> (b f) t d')
+
+            if attn_mask_spatial is not None:
+                x_frame = x_frame + spatial_attn(
+                    x_frame,
+                    attn_mask=attn_mask_spatial
+                )
+            else:
+                x_frame = x_frame + spatial_attn(x_frame)
+
+            x_4d = rearrange(x_frame, '(b f) t d -> b f t d', f=num_frames)
+            x = rearrange(x_4d, 'b f t d -> b (f t) d')
             x = x + ff(x)
 
-        tokens = torch.cat([bos, x], dim=1) 
+        tokens = torch.cat([bos, x], dim=1)
         return self.norm(tokens)
-
 
 class TENSFormer(nn.Module):
     def __init__(
         self,
         dim,
-        dim_head=64,
-        num_heads=8,
+        dim_head=32,
+        num_heads=4,
         num_layers=4,
         ff_mult=4,
         num_tokens=2048,
@@ -141,8 +188,6 @@ class TENSFormer(nn.Module):
         scale_mask = col_idx.unsqueeze(0) <= max_col_for_row.unsqueeze(1)
         time_idx = torch.arange(F, device=device)
         time_mask = time_idx.unsqueeze(1) >= time_idx.unsqueeze(0)
-        attn_mask_temporal = time_mask[:, :, None, None] & scale_mask[None, None, :, :]
-        attn_mask_temporal = attn_mask_temporal.view(F * N, F * N)
         attn_mask_spatial = scale_mask
 
         tokens = torch.cat([motion_tokens, scene_tokens], dim=2)
@@ -152,7 +197,7 @@ class TENSFormer(nn.Module):
         embedding = self.decoder(
             tokens,
             num_frames=F,
-            attn_mask_temporal=attn_mask_temporal, 
+            lengths=lengths,
             attn_mask_spatial=attn_mask_spatial,
             context=context
         )

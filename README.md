@@ -34,13 +34,17 @@ from trainer import SceneTokenizerTrainer
 from dataset import SceneDataset
 ...
 
-NUM_FRAMES = 10
-CONTEXT_FRAME_POINT = 4  
+
+# NUM_FRAMES = 10, CONTEXT_FRAME_POINT = 4 in orig paper
+NUM_FRAMES = 6
+CONTEXT_FRAME_POINT = 3
+DEVICE = 'cuda'
 
 m = MultiScaleVQVAE(
     in_channels = 288
 )
 
+# Occ3D-nuScenes Dataset needed, please check https://github.com/Tsinghua-MARS-Lab/Occ3D
 df = pd.read_csv('data/scene_annotations.csv')
 
 train_df = df[df['is_train']==True].reset_index(drop=True)
@@ -56,7 +60,7 @@ trainer = SceneTokenizerTrainer(
     train_ds = train_ds,
     valid_ds = valid_ds,
     batch_size = 8,
-    device = 'cuda',
+    device = DEVICE,
     autocast_enabled = True,    # Now autocast works!
     ignore_index = 255,
 )
@@ -73,10 +77,11 @@ trainer = SceneTokenizerTrainer(
     num_epochs = None,
     model = m,          # Load the best weights before run!
     optimizer = None,
+    use_scheduler = False,
     train_ds = train_ds, 
     valid_ds = valid_ds,
     batch_size = 8,
-    device = 'cuda',
+    device = DEVICE,
     autocast_enabled = True,
     save_token = True   # If True, valid_ds will be concatenated with train_ds to tokenize the entire dataset.
 )
@@ -96,21 +101,23 @@ train_ds = OccTENSDataset(df = train_df, ann_path = 'data/annotations.json', num
 valid_ds = OccTENSDataset(df = valid_df, ann_path = 'data/annotations.json', num_frames = NUM_FRAMES)
 
 m = OccTENS(
-    dim = 128
+    dim = 128,
+    num_frames=NUM_FRAMES
 )
 
 trainer = OccTENSTrainer(       # AutoRegressive Training
     num_epochs = 50,
     model = m,
-    optimizer = torch.optim.AdamW(lr=1e-4, params=m.parameters()),
+    optimizer = torch.optim.AdamW,
+    lr = 5e-4,
     train_ds = train_ds,
     valid_ds = valid_ds,
     batch_size = 2,
-    device = 'cuda',
+    device = DEVICE,
     autocast_enabled = True,    # Now autocast works!
-    context_frame_point = CONTEXT_FRAME_POINT
+    context_frame_point = CONTEXT_FRAME_POINT,
+    beta_motion = 0.05
 )
-
 trainer.train()
 ```
 
@@ -118,23 +125,31 @@ trainer.train()
 # 4. Generate Tokens
 
 m = OccTENS(
-    dim = 128
-)
+    dim = 128,
+    num_frames=NUM_FRAMES
+).to(DEVICE)
 
-print(m.load_state_dict(torch.load('weights/occtens_best_model.pth')))
-
+print(m.load_state_dict(torch.load('occtens_output/best_model.pth')))
 m.eval()
+
 ar = AutoRegressiveWrapper(
     model=m
+).to(DEVICE)
+
+# test example (pick 1 sample)
+o = valid_ds[0]
+scene_token_ids = o['scene_token'][None,:CONTEXT_FRAME_POINT,...].to(DEVICE)
+motions = o['motion'][None,:CONTEXT_FRAME_POINT,...].to(DEVICE)
+
+ar_out = ar.generate(
+    past_scene_tokens=scene_token_ids, 
+    past_motions=motions,
+    total_frames=NUM_FRAMES,
+    context_point=CONTEXT_FRAME_POINT,
 )
+```
 
-o = valid_ds[0] # test example (pick 1 sample)
-scene_token_ids = o['scene_token'][None,...]
-motions = o['motion'][None,...]
-
-ar_out = ar.generate(scene_token_ids.to('cuda:0'), motions.to('cuda:0'))
-
-
+```python
 # 5. Reconstruction
 
 def tokens_to_indices_list(token_seq, scales):
@@ -154,13 +169,13 @@ def tokens_to_indices_list(token_seq, scales):
 
 vq = MultiScaleVQVAE(
     in_channels = 288
-).to('cuda:0')
+).to(DEVICE)
 
 vq.load_state_dict(torch.load('weights/scene_best_model.pth'))
 
 logits = []
 for i in range(NUM_FRAMES):
-    indices_list = tokens_to_indices_list(token_seq=ar_out['scene_token_ids'][:,i,:].to('cuda:0'), scales=(1,5,10,15,20,25))
+    indices_list = tokens_to_indices_list(token_seq=ar_out['scene_token_ids'][:,i,:].to(DEVICE), scales=(1,5,10,15,20,25))
     out = vq.decode_from_indices(indices_list, out_zyx=True)
     logits.append(out.detach().cpu().numpy())
 ```
