@@ -110,7 +110,7 @@ class OccTENS(nn.Module):
 
         scene_tokens = self.scene_token_embedding(scene_input_ids)
 
-        motion_unknown = (motions == self.ignore_index).any(dim=-1)  # (B, F)
+        motion_unknown = (motions == self.ignore_index).all(dim=-1)  # (B, F)
         safe_motions = motions.clone()
         safe_motions[motion_unknown] = 0.0
         motion_ids = self.motion_tokenizer(safe_motions)[:, :, None]  # (B, F, 1)
@@ -211,85 +211,98 @@ class AutoRegressiveWrapper(nn.Module):
                 f"sum(self.scale_lengths)={start} does not match T_scene={T_scene}"
             )
 
-        future_frames = n_frames - self.context_point
         target_motion_ids = self.model.motion_tokenizer(motions).long()  # (B, F)
 
-        input_scene = scene_token_ids.clone()
-        input_scene[:, self.context_point:, :] = self.ignore_index
-
-        input_motions = motions.clone()
-        input_motions[:, self.context_point:, :] = float(self.ignore_index)
-
-        out = self.model(
-            scene_token_ids=input_scene,
-            motions=input_motions,
-        )
-
-        x = out["full_embedding"][:, :-1, :]  # (B, F*T_frame, D)
-
-        future_f_idx = torch.arange(
-            self.context_point,
-            n_frames,
-            device=device,
-        )
-
-        motion_pos = future_f_idx * T_frame  # (future_frames,)
-
-        h_motion = x[:, motion_pos, :]  # (B, future_frames, D)
-        motion_logits = self.motion_lm_head(h_motion)
-
-        motion_target = target_motion_ids[:, self.context_point:n_frames]
-
-        motion_loss = F.cross_entropy(
-            motion_logits.reshape(-1, motion_logits.size(-1)),
-            motion_target.reshape(-1),
-            reduction="mean",
-        )
-
+        motion_losses = []
         scene_losses = []
 
-        for scale_idx, (start, end) in enumerate(scale_ranges):
-            scale_len = end - start
-
+        for f_idx in range(self.context_point, n_frames):
             input_scene = scene_token_ids.clone()
-            input_scene[:, self.context_point:, :] = self.ignore_index
-
-            if start > 0:
-                input_scene[:, self.context_point:, :start] = (
-                    scene_token_ids[:, self.context_point:, :start]
-                )
             input_motions = motions.clone()
 
+            input_scene[:, self.context_point:, :] = self.ignore_index
+
+            if f_idx > self.context_point:
+                input_scene[:, self.context_point:f_idx, :] = (
+                    scene_token_ids[:, self.context_point:f_idx, :]
+                )
+
+            input_motions[:, self.context_point:, :] = float(self.ignore_index)
+
+            if f_idx > self.context_point:
+                input_motions[:, self.context_point:f_idx, :] = (
+                    motions[:, self.context_point:f_idx, :]
+                )
 
             out = self.model(
                 scene_token_ids=input_scene,
                 motions=input_motions,
             )
 
-            x = out["full_embedding"][:, :-1, :]  # (B, F*T_frame, D)
+            x = out["full_embedding"][:, 1:, :]  # (B, F*T_frame, D)
 
-            pos_list = []
-            for f_idx in range(self.context_point, n_frames):
-                l_start = f_idx * T_frame + 1 + start
-                l_end = f_idx * T_frame + 1 + end
-                pos_list.append(torch.arange(l_start, l_end, device=device))
+            l_motion = f_idx * T_frame
+            h_motion = x[:, l_motion, :]  # (B, D)
 
-            scene_pos = torch.cat(pos_list, dim=0)  # (future_frames * scale_len,)
+            motion_logits = self.motion_lm_head(h_motion)
+            motion_target = target_motion_ids[:, f_idx]
 
-            h_scene = x[:, scene_pos, :]  # (B, future_frames*scale_len, D)
-            scene_logits = self.scene_lm_head(h_scene)
-
-            scene_target = scene_token_ids[:, self.context_point:n_frames, start:end]
-            scene_target = scene_target.reshape(B, future_frames * scale_len)
-
-            scene_loss_i = F.cross_entropy(
-                scene_logits.reshape(-1, scene_logits.size(-1)),
-                scene_target.reshape(-1),
+            motion_loss_i = F.cross_entropy(
+                motion_logits,
+                motion_target,
                 reduction="mean",
             )
 
-            scene_losses.append(scene_loss_i)
+            motion_losses.append(motion_loss_i)
 
+            for scale_idx, (start, end) in enumerate(scale_ranges):
+
+                input_scene = scene_token_ids.clone()
+                input_motions = motions.clone()
+                input_scene[:, self.context_point:, :] = self.ignore_index
+
+                if f_idx > self.context_point:
+                    input_scene[:, self.context_point:f_idx, :] = (
+                        scene_token_ids[:, self.context_point:f_idx, :]
+                    )
+
+                if start > 0:
+                    input_scene[:, f_idx, :start] = scene_token_ids[:, f_idx, :start]
+
+
+                input_motions[:, self.context_point:, :] = float(self.ignore_index)
+
+                if f_idx > self.context_point:
+                    input_motions[:, self.context_point:f_idx, :] = (
+                        motions[:, self.context_point:f_idx, :]
+                    )
+
+                input_motions[:, f_idx, :] = motions[:, f_idx, :]
+
+                out = self.model(
+                    scene_token_ids=input_scene,
+                    motions=input_motions,
+                )
+
+                x = out["full_embedding"][:, 1:, :]  # (B, F*T_frame, D)
+
+                l_start = f_idx * T_frame + 1 + start
+                l_end = f_idx * T_frame + 1 + end
+
+                h_scene = x[:, l_start:l_end, :]  # (B, scale_len, D)
+                scene_logits = self.scene_lm_head(h_scene)
+
+                scene_target = scene_token_ids[:, f_idx, start:end]
+
+                scene_loss_i = F.cross_entropy(
+                    scene_logits.reshape(-1, scene_logits.size(-1)),
+                    scene_target.reshape(-1),
+                    reduction="mean",
+                )
+
+                scene_losses.append(scene_loss_i)
+
+        motion_loss = torch.stack(motion_losses).mean()
         scene_loss = torch.stack(scene_losses).mean()
 
         loss = scene_loss + motion_loss
@@ -326,12 +339,10 @@ class AutoRegressiveWrapper(nn.Module):
 
         n_scales = len(scale_ranges)
 
-        # always train first two coarse scales
         selected_scale_indices = [0]
         if n_scales > 1:
             selected_scale_indices.append(1)
 
-        # sample 1 scale if available
         if n_scales > 2:
             sampled_fine_idx = torch.randint(
                 low=2,
@@ -341,87 +352,96 @@ class AutoRegressiveWrapper(nn.Module):
             ).item()
             selected_scale_indices.append(sampled_fine_idx)
 
-        future_frames = n_frames - self.context_point
-
         target_motion_ids = self.model.motion_tokenizer(motions).long()  # (B, F)
 
-        input_scene = scene_token_ids.clone()
-        input_scene[:, self.context_point:, :] = self.ignore_index
-
-        input_motions = motions.clone()
-        input_motions[:, self.context_point:, :] = float(self.ignore_index)
-
-        out = self.model(
-            scene_token_ids=input_scene,
-            motions=input_motions,
-        )
-
-        x = out["full_embedding"][:, :-1, :]  # (B, F*T_frame, D)
-
-        future_f_idx = torch.arange(
-            self.context_point,
-            n_frames,
-            device=device,
-        )
-
-        motion_pos = future_f_idx * T_frame  # (future_frames,)
-
-        h_motion = x[:, motion_pos, :]  # (B, future_frames, D)
-        motion_logits = self.motion_lm_head(h_motion)
-
-        motion_target = target_motion_ids[:, self.context_point:n_frames]
-
-        motion_loss = F.cross_entropy(
-            motion_logits.reshape(-1, motion_logits.size(-1)),
-            motion_target.reshape(-1),
-            reduction="mean",
-        )
-
+        motion_losses = []
         scene_losses = []
 
-        for scale_idx in selected_scale_indices:
-            start, end = scale_ranges[scale_idx]
-            scale_len = end - start
+        for f_idx in range(self.context_point, n_frames):
 
             input_scene = scene_token_ids.clone()
+            input_motions = motions.clone()
             input_scene[:, self.context_point:, :] = self.ignore_index
-
-            if start > 0:
-                input_scene[:, self.context_point:, :start] = (
-                    scene_token_ids[:, self.context_point:, :start]
+            if f_idx > self.context_point:
+                input_scene[:, self.context_point:f_idx, :] = (
+                    scene_token_ids[:, self.context_point:f_idx, :]
                 )
 
-            input_motions = motions.clone()
+            input_motions[:, self.context_point:, :] = float(self.ignore_index)
+
+            if f_idx > self.context_point:
+                input_motions[:, self.context_point:f_idx, :] = (
+                    motions[:, self.context_point:f_idx, :]
+                )
 
             out = self.model(
                 scene_token_ids=input_scene,
                 motions=input_motions,
             )
 
-            x = out["full_embedding"][:, :-1, :]  # (B, F*T_frame, D)
+            x = out["full_embedding"][:, 1:, :]
 
-            pos_list = []
-            for f_idx in range(self.context_point, n_frames):
-                l_start = f_idx * T_frame + 1 + start
-                l_end = f_idx * T_frame + 1 + end
-                pos_list.append(torch.arange(l_start, l_end, device=device))
+            l_motion = f_idx * T_frame
+            h_motion = x[:, l_motion, :]  # (B, D)
 
-            scene_pos = torch.cat(pos_list, dim=0)  # (future_frames * scale_len,)
+            motion_logits = self.motion_lm_head(h_motion)
+            motion_target = target_motion_ids[:, f_idx]
 
-            h_scene = x[:, scene_pos, :]  # (B, future_frames*scale_len, D)
-            scene_logits = self.scene_lm_head(h_scene)
-
-            scene_target = scene_token_ids[:, self.context_point:n_frames, start:end]
-            scene_target = scene_target.reshape(B, future_frames * scale_len)
-
-            scene_loss_i = F.cross_entropy(
-                scene_logits.reshape(-1, scene_logits.size(-1)),
-                scene_target.reshape(-1),
+            motion_loss_i = F.cross_entropy(
+                motion_logits,
+                motion_target,
                 reduction="mean",
             )
 
-            scene_losses.append(scene_loss_i)
+            motion_losses.append(motion_loss_i)
 
+            for scale_idx in selected_scale_indices:
+                start, end = scale_ranges[scale_idx]
+
+                input_scene = scene_token_ids.clone()
+                input_motions = motions.clone()
+                input_scene[:, self.context_point:, :] = self.ignore_index
+
+                if f_idx > self.context_point:
+                    input_scene[:, self.context_point:f_idx, :] = (
+                        scene_token_ids[:, self.context_point:f_idx, :]
+                    )
+                if start > 0:
+                    input_scene[:, f_idx, :start] = scene_token_ids[:, f_idx, :start]
+
+                input_motions[:, self.context_point:, :] = float(self.ignore_index)
+
+                if f_idx > self.context_point:
+                    input_motions[:, self.context_point:f_idx, :] = (
+                        motions[:, self.context_point:f_idx, :]
+                    )
+
+                input_motions[:, f_idx, :] = motions[:, f_idx, :]
+
+                out = self.model(
+                    scene_token_ids=input_scene,
+                    motions=input_motions,
+                )
+
+                x = out["full_embedding"][:, 1:, :]
+
+                l_start = f_idx * T_frame + 1 + start
+                l_end = f_idx * T_frame + 1 + end
+
+                h_scene = x[:, l_start:l_end, :]  # (B, scale_len, D)
+                scene_logits = self.scene_lm_head(h_scene)
+
+                scene_target = scene_token_ids[:, f_idx, start:end]
+
+                scene_loss_i = F.cross_entropy(
+                    scene_logits.reshape(-1, scene_logits.size(-1)),
+                    scene_target.reshape(-1),
+                    reduction="mean",
+                )
+
+                scene_losses.append(scene_loss_i)
+
+        motion_loss = torch.stack(motion_losses).mean()
         scene_loss = torch.stack(scene_losses).mean()
 
         loss = scene_loss + motion_loss
@@ -439,6 +459,7 @@ class AutoRegressiveWrapper(nn.Module):
         
         return self._forward_full_scale(scene_token_ids, motions)
 
+        
     @torch.no_grad()
     def generate(
         self,
@@ -451,7 +472,7 @@ class AutoRegressiveWrapper(nn.Module):
         temperature=1.0,
         top_k=None,
     ):
-        self.model.eval()
+        self.eval()
 
         if context_point is None:
             context_point = past_scene_tokens.size(1)
@@ -508,7 +529,7 @@ class AutoRegressiveWrapper(nn.Module):
         temperature=1.0,
         top_k=None,
     ):
-        self.model.eval()
+        self.eval()
 
         if temperature <= 0:
             raise ValueError("temperature must be > 0")
@@ -554,14 +575,14 @@ class AutoRegressiveWrapper(nn.Module):
                 if max_steps is not None and generated_steps >= max_steps:
                     break
 
-                motion_is_unknown = (motion_tokens[:, f, :] == self.ignore_index).any(dim=-1)
+                motion_is_unknown = (motion_tokens[:, f, :] == self.ignore_index).all(dim=-1)
 
-                if motion_is_unknown.any():
+                if motion_is_unknown.all():
                     out = self.model(
                         scene_token_ids=scene_tokens,
                         motions=motion_tokens,
                     )
-                    x = out["full_embedding"][:, :-1, :]
+                    x = out["full_embedding"][:, 1:, :]
 
                     l_motion = f * T_frame  # local_idx == 0
                     h = x[motion_is_unknown, l_motion, :]  # (B_active, D)
@@ -598,7 +619,7 @@ class AutoRegressiveWrapper(nn.Module):
                     scene_token_ids=scene_tokens,
                     motions=motion_tokens,
                 )
-                x = out["full_embedding"][:, :-1, :]
+                x = out["full_embedding"][:, 1:, :]
 
                 l_start = f * T_frame + 1 + start
                 l_end = f * T_frame + 1 + end

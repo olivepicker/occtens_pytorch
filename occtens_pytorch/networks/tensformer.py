@@ -167,6 +167,7 @@ class TENSFormer(nn.Module):
         self.bos_token = nn.Parameter(torch.randn(1, 1, dim))
         self.time_pos_emb = nn.Parameter(torch.randn(1, num_frames, 1, dim))
         self.scale_pos_emb = nn.Parameter(torch.randn(1, 1, num_tokens, dim))
+        self.motion_pos_emb = nn.Parameter(torch.randn(1, 1, 1, dim))
         self.decoder = Decoder(dim, dim_head, num_heads, ff_mult, num_layers)
 
     def forward(
@@ -177,19 +178,26 @@ class TENSFormer(nn.Module):
         context=None
     ):
         scene_tokens = scene_tokens + self.time_pos_emb + self.scale_pos_emb
+        motion_tokens = motion_tokens + self.time_pos_emb + self.motion_pos_emb
+        
         B, F = scene_tokens.shape[:2]
         device = scene_tokens.device
-        ends = torch.cumsum(lengths, dim=0)
-        max_cols_per_scale = ends - 1
-        max_col_for_row = torch.repeat_interleave(max_cols_per_scale, lengths)
+        # ends = torch.cumsum(lengths, dim=0)
+        # max_cols_per_scale = ends - 1
+        # max_col_for_row = torch.repeat_interleave(max_cols_per_scale, lengths)
 
-        N = int(max_col_for_row.shape[0])
-        col_idx = torch.arange(N, device=device)
-        scale_mask = col_idx.unsqueeze(0) <= max_col_for_row.unsqueeze(1)
-        time_idx = torch.arange(F, device=device)
-        time_mask = time_idx.unsqueeze(1) >= time_idx.unsqueeze(0)
-        attn_mask_spatial = scale_mask
+        # N = int(max_col_for_row.shape[0])
+        # col_idx = torch.arange(N, device=device)
+        # scale_mask = col_idx.unsqueeze(0) <= max_col_for_row.unsqueeze(1)
+        # time_idx = torch.arange(F, device=device)
+        # time_mask = time_idx.unsqueeze(1) >= time_idx.unsqueeze(0)
+        # attn_mask_spatial = scale_mask
 
+        N = int(lengths.sum().item())
+        idx = torch.arange(N, device=device)
+
+        attn_mask_spatial = idx[None, :] <= idx[:, None]
+        
         tokens = torch.cat([motion_tokens, scene_tokens], dim=2)
         bos_token = self.bos_token.expand(B, 1, -1)
         tokens = torch.cat([bos_token, rearrange(tokens, 'b f t d -> b (f t) d')], dim=1)

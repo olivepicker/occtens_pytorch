@@ -12,7 +12,7 @@ from loss import CustomSceneLoss
 from occtens_pytorch import AutoRegressiveWrapper
 
 
-class SceneTokenizerTrainer(nn.Module):
+class SceneTokenizerTrainer:
     def __init__(
         self, 
         model,
@@ -207,7 +207,7 @@ class SceneTokenizerTrainer(nn.Module):
                     np.save(os.path.join(token_save_path, f'{scene_num}_{scene_id}.npy'), tokens[b])
 
 
-class OccTENSTrainer(nn.Module):
+class OccTENSTrainer:
     def __init__(
         self,
         num_epochs,
