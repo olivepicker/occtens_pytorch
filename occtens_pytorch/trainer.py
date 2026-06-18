@@ -12,6 +12,29 @@ from loss import CustomSceneLoss
 from occtens_pytorch import AutoRegressiveWrapper
 
 
+def logits_to_pred_zyx(logits, num_classes):
+    if logits.dim() == 5:
+        return logits.argmax(dim=1)
+
+    if logits.dim() == 4:
+        logits_3d = rearrange(
+            logits,
+            "b (z c) y x -> b c z y x",
+            c=num_classes,
+        ).contiguous()
+        return logits_3d.argmax(dim=1)
+
+    raise ValueError(f"unexpected logits shape: {logits.shape}")
+
+def average_logs(logs):
+    keys = logs[0].keys()
+    out = {}
+    for k in keys:
+        vals = [log[k].float() for log in logs if k in log]
+        out[k] = torch.stack(vals).mean().item()
+    return out
+
+
 class SceneTokenizerTrainer:
     def __init__(
         self, 
@@ -106,31 +129,51 @@ class SceneTokenizerTrainer:
     def train_one_step(self, batch):
         self.model.train()
         self.optimizer.zero_grad()
+
         x = batch["semantic"].to(self.device)
         mask = batch["mask"].to(self.device)
 
         with torch.autocast(**self.autocast_config):
             out = self.model(x, mask)
             logits = out["logits"]
-            
-            loss_dict = self.criterion(logits, out['y'])
+
+            loss_dict = self.criterion(logits, out["y"])
             rec_loss = loss_dict["loss"]
-            vq_loss = out['vq_loss_sum']
-        
-        total_loss = rec_loss + vq_loss
+            vq_loss = out["vq_loss_sum"]
+
+            total_loss = rec_loss + vq_loss
+
         self.scaler.scale(total_loss).backward()
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        if hasattr(self, 'scheduler') and self.scheduler is not None:
+        if hasattr(self, "scheduler") and self.scheduler is not None:
             self.scheduler.step()
+
+        with torch.no_grad():
+            pred = logits_to_pred_zyx(logits.detach(), self.model.num_classes)
+            metrics = self.compute_scene_metrics(
+                pred=pred,
+                target=out["y"],
+                num_classes=self.model.num_classes,
+                ignore_index=255,
+                free_class=17,
+            )
 
         return {
             "loss_total": total_loss.detach(),
+            "rec_loss": rec_loss.detach(),
+            "vq_loss": vq_loss.detach(),
+            "loss_ce": loss_dict["loss_ce"].detach(),
+            "loss_lovasz": loss_dict["loss_lovasz"].detach(),
+            "loss_geoscal": loss_dict["loss_geoscal"].detach(),
+            "loss_semscal": loss_dict["loss_semscal"].detach(),
+            **{k: v.detach() for k, v in metrics.items()},
         }
 
     def valid_one_step(self, batch):
         self.model.eval()
+
         with torch.no_grad():
             x = batch["semantic"].to(self.device)
             mask = batch["mask"].to(self.device)
@@ -138,48 +181,154 @@ class SceneTokenizerTrainer:
             with torch.autocast(**self.autocast_config):
                 out = self.model(x, mask)
                 logits = out["logits"]
-                
-                loss_dict = self.criterion(logits, out['y'])
+
+                loss_dict = self.criterion(logits, out["y"])
                 rec_loss = loss_dict["loss"]
-                vq_loss = out['vq_loss_sum']
-            
-            total_loss = rec_loss + vq_loss
+                vq_loss = out["vq_loss_sum"]
+
+                total_loss = rec_loss + vq_loss
+
+            pred = logits_to_pred_zyx(logits, self.model.num_classes)
+            metrics = self.compute_scene_metrics(
+                pred=pred,
+                target=out["y"],
+                num_classes=self.model.num_classes,
+                ignore_index=255,
+                free_class=17,
+            )
 
         return {
             "loss_total": total_loss.detach(),
+            "rec_loss": rec_loss.detach(),
+            "vq_loss": vq_loss.detach(),
+            "loss_ce": loss_dict["loss_ce"].detach(),
+            "loss_lovasz": loss_dict["loss_lovasz"].detach(),
+            "loss_geoscal": loss_dict["loss_geoscal"].detach(),
+            "loss_semscal": loss_dict["loss_semscal"].detach(),
+            **{k: v.detach() for k, v in metrics.items()},
         }
-    
+
+    @torch.no_grad()
+    def compute_scene_metrics(self, pred, target, num_classes=18, ignore_index=255, free_class=17):
+        pred = pred.long()
+        target = target.long()
+
+        valid = target != ignore_index
+
+        if valid.sum() == 0:
+            return {
+                "voxel_acc": torch.tensor(0.0, device=pred.device),
+                "miou": torch.tensor(0.0, device=pred.device),
+                "nonfree_iou": torch.tensor(0.0, device=pred.device),
+                "nonfree_recall": torch.tensor(0.0, device=pred.device),
+            }
+
+        pred_v = pred[valid]
+        target_v = target[valid]
+
+        voxel_acc = (pred_v == target_v).float().mean()
+
+        ious = []
+        recalls = []
+
+        for c in range(num_classes):
+            pred_c = pred_v == c
+            target_c = target_v == c
+
+            target_count = target_c.sum()
+            if target_count == 0:
+                continue
+
+            inter = (pred_c & target_c).sum().float()
+            union = (pred_c | target_c).sum().float()
+
+            iou = inter / (union + 1e-6)
+            recall = inter / (target_count.float() + 1e-6)
+
+            ious.append(iou)
+            recalls.append(recall)
+
+        if len(ious) > 0:
+            miou = torch.stack(ious).mean()
+            mean_recall = torch.stack(recalls).mean()
+        else:
+            miou = torch.tensor(0.0, device=pred.device)
+            mean_recall = torch.tensor(0.0, device=pred.device)
+
+        pred_nonfree = pred_v != free_class
+        target_nonfree = target_v != free_class
+
+        inter_nf = (pred_nonfree & target_nonfree).sum().float()
+        union_nf = (pred_nonfree | target_nonfree).sum().float()
+        gt_nf = target_nonfree.sum().float()
+
+        nonfree_iou = inter_nf / (union_nf + 1e-6)
+        nonfree_recall = inter_nf / (gt_nf + 1e-6)
+
+        return {
+            "voxel_acc": voxel_acc,
+            "miou": miou,
+            "mean_recall": mean_recall,
+            "nonfree_iou": nonfree_iou,
+            "nonfree_recall": nonfree_recall,
+        }
+
     def train(self, log_interval=50, val_interval=1):
-        
+
         for epoch in range(self.num_epochs):
             self.model.train()
-            train_loss_sum = 0.0
+            train_logs = []
+
             for step, batch in enumerate(self.train_dl):
                 log = self.train_one_step(batch)
-                train_loss_sum += log["loss_total"].item()
+                train_logs.append(log)
 
                 if (step + 1) % log_interval == 0:
-                    avg = train_loss_sum / (step + 1)
-                    print(f"[Epoch {epoch+1} | Step {step+1}] "
-                          f"train_loss={avg:.4f}")
+                    avg = average_logs(train_logs)
+
+                    print(
+                        f"[Epoch {epoch+1} | Step {step+1}] "
+                        f"loss={avg['loss_total']:.4f} "
+                        f"rec={avg['rec_loss']:.4f} "
+                        f"vq={avg['vq_loss']:.4f} "
+                        f"acc={avg['voxel_acc']:.4f} "
+                        f"miou={avg['miou']:.4f} "
+                        f"nf_iou={avg['nonfree_iou']:.4f} "
+                        f"nf_rec={avg['nonfree_recall']:.4f}"
+                    )
 
             if (epoch + 1) % val_interval == 0:
                 self.model.eval()
-                val_loss_sum = 0.0
+                val_logs = []
+
                 with torch.no_grad():
                     for batch in self.valid_dl:
                         log = self.valid_one_step(batch)
-                        val_loss_sum += log["loss_total"].item()
-                val_avg = val_loss_sum / max(1, len(self.valid_dl))
-                print(f"[Epoch {epoch+1}] val_loss={val_avg:.4f}")
+                        val_logs.append(log)
 
-                if val_avg < self.best_val_loss:
-                    print(f"Validation loss improved from {self.best_val_loss:.4f} to {val_avg:.4f}. Saving best model...")
-                    self.best_val_loss = val_avg
-                    
+                val_avg = average_logs(val_logs)
+
+                print(
+                    f"[Epoch {epoch+1}] "
+                    f"val_loss={val_avg['loss_total']:.4f} "
+                    f"rec={val_avg['rec_loss']:.4f} "
+                    f"vq={val_avg['vq_loss']:.4f} "
+                    f"acc={val_avg['voxel_acc']:.4f} "
+                    f"miou={val_avg['miou']:.4f} "
+                    f"nf_iou={val_avg['nonfree_iou']:.4f} "
+                    f"nf_rec={val_avg['nonfree_recall']:.4f}"
+                )
+
+                if val_avg["loss_total"] < self.best_val_loss:
+                    print(
+                        f"Validation loss improved from {self.best_val_loss:.4f} "
+                        f"to {val_avg['loss_total']:.4f}. Saving best model..."
+                    )
+                    self.best_val_loss = val_avg["loss_total"]
+
                     save_path = os.path.join(self.save_path, "best_model.pth")
                     torch.save(self.model.state_dict(), save_path)
-                
+
                 last_path = os.path.join(self.save_path, "last_model.pth")
                 torch.save(self.model.state_dict(), last_path)
 

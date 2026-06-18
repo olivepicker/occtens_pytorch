@@ -13,7 +13,7 @@ class VectorQuantizer(nn.Module):
         self.eps = eps
 
         self.codebook = nn.Embedding(num_codes, code_dim)
-        nn.init.uniform_(self.codebook.weight, -1.0 / num_codes, 1.0 / num_codes)
+        nn.init.normal_(self.codebook.weight, mean=0.0, std=1.0)
 
     @torch.no_grad()
     def _nearest_indices(self, z: torch.Tensor) -> torch.Tensor:
@@ -126,10 +126,13 @@ class MultiScaleVQVAE(nn.Module):
             f_hat = f_hat + f_p
             f_rest = f_rest - f_p
 
-            vq_loss_sum += F.mse_loss(f_hat.data, f) * self.beta + F.mse_loss(f_hat, f_no_grad)
+            commit_loss = F.mse_loss(f_hat.detach(), f)
+            codebook_loss = F.mse_loss(f_hat, f.detach())
+
+            vq_loss_sum += self.beta * commit_loss + codebook_loss
             stats[f"perplexity_s{s}"] = perplex_s.detach()
-    
-        f_hat = (f_hat.data - f_no_grad).add_(f)
+
+        f_hat = f + (f_hat - f).detach()
 
         return f_hat, indices_list, stats, vq_loss_sum / len(self.scales)
 
@@ -152,7 +155,7 @@ class MultiScaleVQVAE(nn.Module):
             z = F.interpolate(z, size=(H_lat, W_lat), mode="bicubic").contiguous()
             f += self.phi[idx](z)
 
-        logits = self.decoder(self.post_quant_norm(self.post_quant_conv(f)))
+        logits = self.decode_latent(f)
 
         if out_zyx:
             logits_3d = rearrange(logits, "b (z c) y x -> b c z y x", c=self.num_classes).contiguous()
@@ -162,30 +165,48 @@ class MultiScaleVQVAE(nn.Module):
 
         return logits
 
+    def decode_latent(self, f):
+        f = self.post_quant_conv(f)
+        f = self.post_quant_norm(f)
+        logits = self.decoder(f)
+        return logits
+
     def forward(self, x, mask=None, return_token_only=False):
         B, Z, Y, X = x.size()
+
         y = x.clone().long()
+        x_in = x.clone().long()
 
-        # if mask is not None:
-        #     y.masked_fill_(~mask.bool(), 255)
+        if mask is not None:
+            valid = mask.bool()
+            y = y.masked_fill(~valid, 255)
+            x_in = x_in.masked_fill(~valid, 0)
+        else:
+            valid = torch.ones_like(y, dtype=torch.bool)
 
-        x_one_hot = F.one_hot(x.long(), num_classes=self.num_classes)
-        x = rearrange(x_one_hot, 'b z y x c -> b (z c) y x').float()
+        x_one_hot = F.one_hot(
+            x_in.clamp(0, self.num_classes - 1),
+            num_classes=self.num_classes,
+        ).float()
 
-        f_hat, indices_list, stats, vq_loss_sum = self.encode(x)
+        if mask is not None:
+            x_one_hot = x_one_hot * valid.unsqueeze(-1).float()
+
+        x_2d = rearrange(x_one_hot, "b z y x c -> b (z c) y x").contiguous()
+
+        f_hat, indices_list, stats, vq_loss_sum = self.encode(x_2d)
 
         if return_token_only:
             return indices_list
-            
-        x_hat = self.decoder(self.post_quant_conv(f_hat))
 
-        stats['x'] = rearrange(x_one_hot, 'b z y x c -> b c z y x')
-        stats['y'] = y
-        stats['logits'] = x_hat
-        stats['vq_loss_sum'] = vq_loss_sum
+        x_hat = self.decode_latent(f_hat)
+
+        stats["x"] = rearrange(x_one_hot, "b z y x c -> b c z y x").contiguous()
+        stats["y"] = y
+        stats["logits"] = x_hat
+        stats["vq_loss_sum"] = vq_loss_sum
 
         return stats
-
 
 # Upsample, Downsample class
 # https://github.com/FoundationVision/VAR/blob/78b95394fc5896192e3a003e4b295f8ea743c48f/models/basic_vae.py#L22

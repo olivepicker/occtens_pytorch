@@ -116,7 +116,7 @@ trainer = OccTENSTrainer(       # AutoRegressive Training
     device = DEVICE,
     autocast_enabled = True,    # Now autocast works!
     context_frame_point = CONTEXT_FRAME_POINT,
-    beta_motion = 0.05
+    beta_motion = 1.
 )
 trainer.train()
 ```
